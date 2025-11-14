@@ -1,0 +1,17 @@
+# Virtual Environment
+venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Data and Models (We don't want to upload these to Git)
+data/
+models/
+results/
+
+# OS / IDE files
+.DS_Store
+.vscode/
+*.ipynb_checkpoints
