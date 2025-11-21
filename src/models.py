@@ -1,51 +1,123 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from timm import create_model
 
+# ==========================================
+# 1. SOTA Feature Extractor (PatchCore-like)
+# ==========================================
 def get_feature_extractor(model_name="wide_resnet50_2", pretrained=True):
     """
     Loads a pre-trained Wide-ResNet-50 and extracts intermediate feature maps.
-    This model is our new 'encoder'.
     """
     model = create_model(
         model_name,
         pretrained=pretrained,
         features_only=True,
-        out_indices=[1, 2, 3] # Extract features from 3 different scales
+        out_indices=[1, 2, 3] 
     )
-    model.eval() # Set to evaluation mode (no gradients needed)
-    
-    class FeatureExtractorWrapper(nn.Module):
+    model.eval()
+
+    class PatchFeatureExtractor(nn.Module):
         def __init__(self, model):
             super().__init__()
             self.model = model
-            self.channels = self.model.feature_info.channels()
-            self.pools = nn.ModuleList([nn.AdaptiveAvgPool2d(1) for _ in self.channels])
         
         def forward(self, x):
             features = self.model(x)
-            pooled_features = [pool(f) for pool, f in zip(self.pools, features)]
-            
-            # h shape is (B, 1792, 1, 1)
-            h = torch.cat(pooled_features, dim=1)
-            
-            # 💡 FIX: Only squeeze the last two (H, W) dimensions
-            # This ensures output is always 2D: (B, 1792)
-            return h.squeeze(-1).squeeze(-1)
+            target_size = features[0].shape[2:] 
+            resized_features = [
+                F.interpolate(f, size=target_size, mode='bilinear', align_corners=False)
+                for f in features
+            ]
+            patch_features = torch.cat(resized_features, dim=1)
+            return patch_features
 
-    return FeatureExtractorWrapper(model)
+    return PatchFeatureExtractor(model)
 
-if __name__ == "__main__":
-    # Test the feature extractor
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = get_feature_extractor().to(device)
-    
-    dummy_input = torch.randn(16, 3, 256, 256).to(device)
-    
-    with torch.no_grad():
-        features = model(dummy_input)
-    
-    print("--- Feature Extractor Test ---")
-    print(f"Input shape: {dummy_input.shape}")
-    print(f"Output feature vector shape: {features.shape}")
-    # Expected output: torch.Size([16, 1792])
+# ==========================================
+# 2. Pixel-Based Models (CAE & VAE)
+# ==========================================
+
+# REDUCED CAPACITY Encoder (32->256 channels) to prevent identity mapping
+class Encoder(nn.Module):
+    def __init__(self, latent_dim=512):
+        super().__init__()
+        # Input: 256 -> 128 -> 64 -> 32 -> 16
+        self.conv1 = nn.Conv2d(3, 32, 4, 2, 1)
+        self.conv2 = nn.Conv2d(32, 64, 4, 2, 1)
+        self.conv3 = nn.Conv2d(64, 128, 4, 2, 1)
+        self.conv4 = nn.Conv2d(128, 256, 4, 2, 1) 
+        self.fc = nn.Linear(256 * 16 * 16, latent_dim) 
+
+    def forward(self, x):
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
+        x = F.relu(self.conv3(x))
+        x = F.relu(self.conv4(x))
+        batch_size = x.size(0)
+        return self.fc(x.view(batch_size, -1))
+
+# REDUCED CAPACITY Decoder (256->32 channels)
+class Decoder(nn.Module):
+    def __init__(self, latent_dim=512):
+        super().__init__()
+        self.fc = nn.Linear(latent_dim, 256 * 16 * 16)
+        # 16 -> 32 -> 64 -> 128 -> 256
+        self.deconv1 = nn.ConvTranspose2d(256, 128, 4, 2, 1)
+        self.deconv2 = nn.ConvTranspose2d(128, 64, 4, 2, 1)
+        self.deconv3 = nn.ConvTranspose2d(64, 32, 4, 2, 1)
+        self.deconv4 = nn.ConvTranspose2d(32, 3, 4, 2, 1) 
+
+    def forward(self, z):
+        x = self.fc(z).view(-1, 256, 16, 16)
+        x = F.relu(self.deconv1(x))
+        x = F.relu(self.deconv2(x))
+        x = F.relu(self.deconv3(x))
+        return torch.sigmoid(self.deconv4(x))
+
+class CAE(nn.Module):
+    def __init__(self, latent_dim=512):
+        super().__init__()
+        self.encoder = Encoder(latent_dim)
+        self.decoder = Decoder(latent_dim)
+    def forward(self, x):
+        return self.decoder(self.encoder(x))
+
+class VAE(nn.Module):
+    def __init__(self, latent_dim=512):
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.conv1 = nn.Conv2d(3, 32, 4, 2, 1)
+        self.conv2 = nn.Conv2d(32, 64, 4, 2, 1)
+        self.conv3 = nn.Conv2d(64, 128, 4, 2, 1)
+        self.conv4 = nn.Conv2d(128, 256, 4, 2, 1)
+        self.fc_mu = nn.Linear(256 * 16 * 16, latent_dim)
+        self.fc_logvar = nn.Linear(256 * 16 * 16, latent_dim)
+        self.decoder = Decoder(latent_dim)
+
+    def encode(self, x):
+        h = F.relu(self.conv1(x))
+        h = F.relu(self.conv2(h))
+        h = F.relu(self.conv3(h))
+        h = F.relu(self.conv4(h))
+        h = h.view(h.size(0), -1)
+        return self.fc_mu(h), self.fc_logvar(h)
+
+    def reparameterize(self, mu, logvar):
+        std = torch.exp(0.5 * logvar)
+        return mu + torch.randn_like(std) * std
+
+    def forward(self, x):
+        mu, logvar = self.encode(x)
+        z = self.reparameterize(mu, logvar)
+        return self.decoder(z), mu, logvar
+
+# Loss Functions (L1)
+def cae_loss(recon, x):
+    return F.l1_loss(recon, x, reduction='mean')
+
+def vae_loss(recon, x, mu, logvar):
+    recon_loss = F.l1_loss(recon, x, reduction='mean') 
+    kl_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+    return recon_loss + kl_loss, recon_loss, kl_loss
