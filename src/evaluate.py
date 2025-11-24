@@ -15,35 +15,36 @@ from src.utils import compute_aupro, compute_image_auroc
 RESOLUTION = 256
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 GAUSSIAN_SIGMA = 4.0
-# Define the same normalization as in the dataloader
 IMAGENET_NORM = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 
-def load_memory_bank(category="bottle"):
-    """Loads the pre-built FAISS index."""
-    bank_path = f"models/{category}_memory_bank.index"
+def load_memory_bank_and_projector(category="bottle"):
+    bank_path = f"models/{category}_patch_memory_bank.index"
+    projector_path = f"models/{category}_patch_projector.pth"
+    
     if not os.path.exists(bank_path):
         raise FileNotFoundError(f"Memory bank not found: {bank_path}. Run build_memory_bank.py first.")
         
-    print(f"Loading memory bank from {bank_path}")
-    return faiss.read_index(bank_path)
+    print(f"Loading patch memory bank from {bank_path}")
+    index = faiss.read_index(bank_path)
+    
+    print(f"Loading projector from {projector_path}")
+    projector = torch.load(projector_path)
+    
+    return index, projector
 
 def evaluate_category_features(category="bottle"):
-    """
-    Evaluates a category using the feature-distance method.
-    """
-    print(f"\n🚀 Starting feature-based evaluation for '{category}'...")
+    print(f"\n🚀 Starting PATCH-LEVEL evaluation for '{category}'...")
     
-    # 1. Load Model and Memory Bank
     model = get_feature_extractor().to(DEVICE)
-    index = load_memory_bank(category)
-    feature_dim = index.d # Get dimension (1792) from the index
+    index, projector = load_memory_bank_and_projector(category)
+    
+    # Raw feature dim is needed for reshaping
+    raw_feature_dim = 1792
 
-    # 2. Setup Dirs & Transforms
     test_dir = Path("data/mvtec_ad") / category / "test"
     gt_dir = Path("data/mvtec_ad") / category / "ground_truth"
     os.makedirs("results", exist_ok=True)
     
-    # Create the transform for test images
     test_transform = T.Compose([
         T.Resize((RESOLUTION, RESOLUTION)),
         T.ToTensor(),
@@ -52,31 +53,56 @@ def evaluate_category_features(category="bottle"):
     
     anomaly_maps, gt_masks, image_scores, image_labels = [], [], [], []
 
-    # 3. Evaluation Loop
     for defect_type in sorted(test_dir.iterdir()):
         if not defect_type.is_dir(): continue
         is_anomaly = defect_type.name != "good"
         
         for i, img_path in enumerate(tqdm(sorted(defect_type.glob("*.png")), desc=f"Evaluating {defect_type.name}")):
             
-            # 1. Load and Transform Image
             image = Image.open(img_path).convert("RGB")
             x = test_transform(image).unsqueeze(0).to(DEVICE)
             
-            # 2. Extract Features
+            # 1. Extract Patch Features
             with torch.no_grad():
-                features = model(x).cpu().numpy().astype(np.float32)
+                patch_features = model(x) # Shape (1, 1792, 64, 64)
                 
-            # 3. Score Features
-            # Find K-Nearest Neighbors (K=1)
-            # D = distances, I = indices
-            D, I = index.search(features, 1) # D is shape [1, 1]
+                # Reshape: [1, C, H, W] -> [H*W, C]
+                H, W = patch_features.shape[2:]
+                patch_vectors = patch_features.permute(0, 2, 3, 1).reshape(H * W, raw_feature_dim)
+                patch_vectors_np = patch_vectors.cpu().numpy()
+
+            # 2. Project and Score Features
+            projected_patch_vectors = projector.transform(patch_vectors_np).astype(np.float32)
             
-            # The anomaly score for the *entire image* is its L2 distance
-            # to the closest normal image in the memory bank
-            image_anomaly_score = D[0][0]
+            # Find K-Nearest Neighbors (K=1) for *each patch*
+            D, I = index.search(projected_patch_vectors, 1) # D is shape [H*W, 1]
             
-            # 4. Load Ground Truth Mask
+            # 3. Create Anomaly Map
+            # Reshape distances back to spatial map [H, W]
+            anomaly_map_hw = D.reshape(H, W)
+            
+            # Upscale the small 64x64 map to the full 256x256 resolution
+            anomaly_map_full = T.Resize(
+                (RESOLUTION, RESOLUTION), 
+                interpolation=T.InterpolationMode.BILINEAR,
+                antialias=True
+            )(torch.tensor(anomaly_map_hw).unsqueeze(0).unsqueeze(0)).squeeze().numpy()
+            
+            # Apply Gaussian smoothing
+            error_map = gaussian_filter(anomaly_map_full, sigma=GAUSSIAN_SIGMA)
+            
+            # 4. Visualization (Save first few examples)
+            if (defect_type.name == "good" and i == 0) or (defect_type.name == "broken_large" and i == 0):
+                # Save original image (denormalize manually for viz)
+                orig_img = Image.open(img_path).resize((RESOLUTION, RESOLUTION))
+                orig_img.save(f"results/patch_input_{defect_type.name}.png")
+                
+                # Save error map (normalize to 0-1 for saving)
+                norm_error = (error_map - error_map.min()) / (error_map.max() - error_map.min() + 1e-8)
+                error_vis = torch.from_numpy(norm_error).unsqueeze(0).repeat(3,1,1)
+                save_image(error_vis, f"results/patch_error_{defect_type.name}.png")
+
+            # 5. Load Ground Truth Mask
             if is_anomaly:
                 mask_path = gt_dir / defect_type.name / (img_path.stem + "_mask.png")
                 mask = Image.open(mask_path).convert("L")
@@ -85,21 +111,16 @@ def evaluate_category_features(category="bottle"):
             else:
                 mask = np.zeros((RESOLUTION, RESOLUTION))
             
-            # 5. Store Metrics
-            # For this method (global feature vector), the anomaly map
-            # is just a constant value (the image score) across all pixels.
-            anomaly_map = np.full((RESOLUTION, RESOLUTION), image_anomaly_score)
-            
-            anomaly_maps.append(anomaly_map)
+            anomaly_maps.append(error_map)
             gt_masks.append((mask > 0.5).astype(np.uint8))
-            image_scores.append(image_anomaly_score)
+            image_scores.append(error_map.max()) 
             image_labels.append(1 if is_anomaly else 0)
     
     # 6. Compute Final Metrics
     pixel_aupro = compute_aupro(anomaly_maps, gt_masks)
     image_auroc = compute_image_auroc(image_scores, image_labels)
     
-    print(f"\n📊 {category.upper()} (Feature-Level)")
+    print(f"\n📊 {category.upper()} (Patch-Level)")
     print(f"   Pixel AUPRO: {pixel_aupro:.4f}")
     print(f"   Image AUROC: {image_auroc:.4f}")
     return pixel_aupro, image_auroc

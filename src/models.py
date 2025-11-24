@@ -4,11 +4,15 @@ import torch.nn.functional as F
 from timm import create_model
 
 # ==========================================
-# 1. SOTA Feature Extractor (PatchCore-like)
+# 1. SOTA Feature Extractor (Patch-Based)
 # ==========================================
 def get_feature_extractor(model_name="wide_resnet50_2", pretrained=True):
     """
-    Loads a pre-trained Wide-ResNet-50 and extracts intermediate feature maps.
+    Loads a pre-trained Wide-ResNet-50 and extracts intermediate feature maps
+    as spatial patches.
+    
+    🚀 OPTIMIZATION: Aligns features to the smallest spatial map (Layer 3)
+    to significantly increase inference speed (16x faster).
     """
     model = create_model(
         model_name,
@@ -24,13 +28,23 @@ def get_feature_extractor(model_name="wide_resnet50_2", pretrained=True):
             self.model = model
         
         def forward(self, x):
+            # Get features from layers 1, 2, 3
             features = self.model(x)
-            target_size = features[0].shape[2:] 
+            
+            # 💡 OPTIMIZATION FIX: Use the smallest feature map (Layer 3) as target size
+            # For 256x256 input:
+            # Layer 1: 64x64 (4096 patches) -> Too slow
+            # Layer 3: 16x16 (256 patches)  -> Fast & Accurate
+            target_size = features[-1].shape[2:] 
+            
             resized_features = [
                 F.interpolate(f, size=target_size, mode='bilinear', align_corners=False)
                 for f in features
             ]
+            
+            # Concatenate along channel dimension
             patch_features = torch.cat(resized_features, dim=1)
+            
             return patch_features
 
     return PatchFeatureExtractor(model)
@@ -39,11 +53,10 @@ def get_feature_extractor(model_name="wide_resnet50_2", pretrained=True):
 # 2. Pixel-Based Models (CAE & VAE)
 # ==========================================
 
-# REDUCED CAPACITY Encoder (32->256 channels) to prevent identity mapping
+# REDUCED CAPACITY Encoder (32->256 channels)
 class Encoder(nn.Module):
     def __init__(self, latent_dim=512):
         super().__init__()
-        # Input: 256 -> 128 -> 64 -> 32 -> 16
         self.conv1 = nn.Conv2d(3, 32, 4, 2, 1)
         self.conv2 = nn.Conv2d(32, 64, 4, 2, 1)
         self.conv3 = nn.Conv2d(64, 128, 4, 2, 1)
@@ -58,12 +71,10 @@ class Encoder(nn.Module):
         batch_size = x.size(0)
         return self.fc(x.view(batch_size, -1))
 
-# REDUCED CAPACITY Decoder (256->32 channels)
 class Decoder(nn.Module):
     def __init__(self, latent_dim=512):
         super().__init__()
         self.fc = nn.Linear(latent_dim, 256 * 16 * 16)
-        # 16 -> 32 -> 64 -> 128 -> 256
         self.deconv1 = nn.ConvTranspose2d(256, 128, 4, 2, 1)
         self.deconv2 = nn.ConvTranspose2d(128, 64, 4, 2, 1)
         self.deconv3 = nn.ConvTranspose2d(64, 32, 4, 2, 1)
@@ -113,7 +124,6 @@ class VAE(nn.Module):
         z = self.reparameterize(mu, logvar)
         return self.decoder(z), mu, logvar
 
-# Loss Functions (L1)
 def cae_loss(recon, x):
     return F.l1_loss(recon, x, reduction='mean')
 
