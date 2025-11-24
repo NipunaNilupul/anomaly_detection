@@ -33,13 +33,13 @@ def load_memory_bank_and_projector(category="bottle"):
     return index, projector
 
 def evaluate_category_features(category="bottle"):
-    print(f"\n🚀 Starting PATCH-LEVEL evaluation for '{category}'...")
+    print(f"\n🚀 Starting PATCH-LEVEL evaluation for '{category}' (ResNet-18)...")
     
     model = get_feature_extractor().to(DEVICE)
     index, projector = load_memory_bank_and_projector(category)
     
-    # Raw feature dim is needed for reshaping
-    raw_feature_dim = 1792
+    # ⚡ OPTIMIZATION: Updated for ResNet-18
+    raw_feature_dim = 448 
 
     test_dir = Path("data/mvtec_ad") / category / "test"
     gt_dir = Path("data/mvtec_ad") / category / "ground_truth"
@@ -62,47 +62,32 @@ def evaluate_category_features(category="bottle"):
             image = Image.open(img_path).convert("RGB")
             x = test_transform(image).unsqueeze(0).to(DEVICE)
             
-            # 1. Extract Patch Features
             with torch.no_grad():
-                patch_features = model(x) # Shape (1, 1792, 64, 64)
+                patch_features = model(x) 
                 
-                # Reshape: [1, C, H, W] -> [H*W, C]
                 H, W = patch_features.shape[2:]
                 patch_vectors = patch_features.permute(0, 2, 3, 1).reshape(H * W, raw_feature_dim)
                 patch_vectors_np = patch_vectors.cpu().numpy()
 
-            # 2. Project and Score Features
             projected_patch_vectors = projector.transform(patch_vectors_np).astype(np.float32)
+            D, I = index.search(projected_patch_vectors, 1) 
             
-            # Find K-Nearest Neighbors (K=1) for *each patch*
-            D, I = index.search(projected_patch_vectors, 1) # D is shape [H*W, 1]
-            
-            # 3. Create Anomaly Map
-            # Reshape distances back to spatial map [H, W]
             anomaly_map_hw = D.reshape(H, W)
-            
-            # Upscale the small 64x64 map to the full 256x256 resolution
             anomaly_map_full = T.Resize(
                 (RESOLUTION, RESOLUTION), 
                 interpolation=T.InterpolationMode.BILINEAR,
                 antialias=True
             )(torch.tensor(anomaly_map_hw).unsqueeze(0).unsqueeze(0)).squeeze().numpy()
             
-            # Apply Gaussian smoothing
             error_map = gaussian_filter(anomaly_map_full, sigma=GAUSSIAN_SIGMA)
             
-            # 4. Visualization (Save first few examples)
             if (defect_type.name == "good" and i == 0) or (defect_type.name == "broken_large" and i == 0):
-                # Save original image (denormalize manually for viz)
                 orig_img = Image.open(img_path).resize((RESOLUTION, RESOLUTION))
                 orig_img.save(f"results/patch_input_{defect_type.name}.png")
-                
-                # Save error map (normalize to 0-1 for saving)
                 norm_error = (error_map - error_map.min()) / (error_map.max() - error_map.min() + 1e-8)
                 error_vis = torch.from_numpy(norm_error).unsqueeze(0).repeat(3,1,1)
                 save_image(error_vis, f"results/patch_error_{defect_type.name}.png")
 
-            # 5. Load Ground Truth Mask
             if is_anomaly:
                 mask_path = gt_dir / defect_type.name / (img_path.stem + "_mask.png")
                 mask = Image.open(mask_path).convert("L")
@@ -116,7 +101,6 @@ def evaluate_category_features(category="bottle"):
             image_scores.append(error_map.max()) 
             image_labels.append(1 if is_anomaly else 0)
     
-    # 6. Compute Final Metrics
     pixel_aupro = compute_aupro(anomaly_maps, gt_masks)
     image_auroc = compute_image_auroc(image_scores, image_labels)
     

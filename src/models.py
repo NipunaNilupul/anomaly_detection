@@ -6,13 +6,10 @@ from timm import create_model
 # ==========================================
 # 1. SOTA Feature Extractor (Patch-Based)
 # ==========================================
-def get_feature_extractor(model_name="wide_resnet50_2", pretrained=True):
+def get_feature_extractor(model_name="resnet18", pretrained=True):
     """
-    Loads a pre-trained Wide-ResNet-50 and extracts intermediate feature maps
+    Loads a pre-trained ResNet-18 and extracts intermediate feature maps
     as spatial patches.
-    
-    🚀 OPTIMIZATION: Aligns features to the smallest spatial map (Layer 3)
-    to significantly increase inference speed (16x faster).
     """
     model = create_model(
         model_name,
@@ -28,13 +25,9 @@ def get_feature_extractor(model_name="wide_resnet50_2", pretrained=True):
             self.model = model
         
         def forward(self, x):
-            # Get features from layers 1, 2, 3
             features = self.model(x)
             
-            # 💡 OPTIMIZATION FIX: Use the smallest feature map (Layer 3) as target size
-            # For 256x256 input:
-            # Layer 1: 64x64 (4096 patches) -> Too slow
-            # Layer 3: 16x16 (256 patches)  -> Fast & Accurate
+            # Align features to Layer 3 size (16x16 for 256 input)
             target_size = features[-1].shape[2:] 
             
             resized_features = [
@@ -42,7 +35,7 @@ def get_feature_extractor(model_name="wide_resnet50_2", pretrained=True):
                 for f in features
             ]
             
-            # Concatenate along channel dimension
+            # ResNet18: 64 + 128 + 256 = 448 channels
             patch_features = torch.cat(resized_features, dim=1)
             
             return patch_features
@@ -50,10 +43,8 @@ def get_feature_extractor(model_name="wide_resnet50_2", pretrained=True):
     return PatchFeatureExtractor(model)
 
 # ==========================================
-# 2. Pixel-Based Models (CAE & VAE)
+# 2. Pixel-Based Models (Legacy)
 # ==========================================
-
-# REDUCED CAPACITY Encoder (32->256 channels)
 class Encoder(nn.Module):
     def __init__(self, latent_dim=512):
         super().__init__()
