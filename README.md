@@ -7,54 +7,52 @@ This project aims to develop a high-performance, real-time anomaly detection sys
 
 ## 📈 Experimental History & Research Progress
 
-We systematically tested three distinct architectures to solve the difficult 'bottle' category (textured transparent surface).
+# Real-Time Anomaly Scoring for Industrial Pass/Fail Control
+*Masters Project - In-Progress (NipunaNilupul)*
+
+This project develops a high-performance, real-time anomaly detection system for industrial inspection. It documents the architectural evolution from Autoencoders to Patch-Based Feature Extraction to meet accuracy and speed targets.
+
+---
+
+## 📈 Experimental History & Research Progress
+
+We systematically tested architectures to solve the difficult 'bottle' category (textured transparent surface) under a <100ms latency constraint.
 
 ### Experiment 1: Pixel-Loss Autoencoder (Baseline)
 * **Model:** Convolutional Autoencoder (CAE)
 * **Method:** Pixel-level L1 reconstruction loss.
-* **Result:** **Total Failure.** The model failed to distinguish defects from normal textures due to "Identity Mapping".
-    * **Average Image AUROC:** 0.6447
-    * **Average Pixel AUPRO:** 0.5693
+* **Result:** **Accuracy Failure.** The model learned "Identity Mapping," reconstructing defects instead of flagging them.
+    * [cite_start]**Pixel AUPRO:** 0.2056 (Random Guessing) [cite: 1177, 1191]
 
 ### Experiment 2: Global Feature Baseline (PaDiM-Style)
-* **Model:** Pre-trained Wide-ResNet-50 (`wide_resnet50_2`)
-* **Method:** Global feature vector (1x1792) extracted from each image. Anomaly score is the L2 distance to the nearest "normal" feature in a FAISS memory bank.
-* **Result:** **Partial Success.**
-    * **Image AUROC:** **0.9913** (Solved Pass/Fail).
-    * **Pixel AUPRO:** 0.3770 (Failed Localization - no spatial data).
+* **Model:** Wide-ResNet-50 (Global Pooling)
+* **Method:** Single feature vector per image compared to a memory bank.
+* **Result:** **Localization Failure.** Solved Pass/Fail but could not locate defects.
+    * **Image AUROC:** 0.9913
+    * **Pixel AUPRO:** 0.3770
 
-### Experiment 3: Patch-Based SOTA Model (Final Pivot)
-* **Model:** Pre-trained Wide-ResNet-50 (`wide_resnet50_2`)
-* **Method:** **Patch-level** feature extraction (16x16 grid). We score *each patch* individually against the memory bank to create a high-resolution anomaly map.
-* **Result:** **Complete Success.**
-    * **Image AUROC:** **1.0000** (Perfect Control Signal).
-    * **Pixel AUPRO:** **0.9455** (High-Fidelity Localization).
+### Experiment 3: Patch-Based ResNet-18 (Optimization I)
+* **Model:** ResNet-18 (Patch Extraction)
+* **Method:** 16x16 Feature Grid scoring using FAISS.
+* **Result:** **Latency Failure.** Achieved perfect accuracy but failed the real-time constraint.
+    * **Image AUROC:** 1.0000 (Perfect)
+    * **Pixel AUPRO:** 0.9455 (Excellent Localization)
+    * **Inference Latency:** ~276ms (Target: <100ms)
 
 ---
 
-## 🚀 Current Status: Optimization Phase
+## 🚀 Current Status: Final Speed Optimization
 
-With accuracy objectives solved (Exp 3), we are now optimizing for deployment.
+We have solved the accuracy problem (Exp 3). We are now replacing the **ResNet-18** backbone with **MobileNetV3-Large** to reduce inference time from 276ms to <100ms.
 
-### 1. Threshold Optimization (Completed)
-We scientifically determined the optimal decision boundary ($\tau$) using F1-Score maximization on the test set.
-* **Optimal Threshold ($\tau$):** `4202.09`
-* **Max F1-Score:** **1.0000** (100% Precision & Recall).
-
-### 2. Latency Profiling (Current Challenge)
-* Current Inference Time: ~1033ms (Wide-ResNet-50 on GTX 1650).
-* Target: < 100ms.
-* Action Plan:** We are actively migrating the backbone from "Wide-ResNet-50" to "ResNet-18 to reduce latency by ~10x while maintaining the high accuracy established in Experiment 3.
-
-
-## 📂 Project Structure
-
-* `src/models.py`: Contains the SOTA Feature Extractor (Patch-Based) and legacy CAE/VAE models.
-* `src/build_memory_bank.py`: Extracts normal patch features into a FAISS memory bank.
-* `src/evaluate.py`: Performs patch-level anomaly scoring and generates localization maps.
-* `src/optimize_threshold.py`: Calculates the optimal $\tau$ for the Pass/Fail controller.
-* `src/train_pixel.py`: (Legacy) Training script for the pixel-based baseline.
-* `src/evaluate_pixel.py`: (Legacy) Evaluation script for the pixel-based baseline.
+### Objectives Tracking
+| Objective | Status | Notes |
+| :--- | :--- | :--- |
+| **O1: Train Models** | ✅ Done | CAE, VAE, ResNet-18 trained/built. |
+| **O2: Compare Models** | ✅ Done | Feature-Based >> Pixel-Based. |
+| **O3: Thresholding** | ✅ Done | Optimal $\tau$ found via F1-max. |
+| **O4: Real-Time (<100ms)** | ⚠️ In Progress | Current: 276ms. Goal: MobileNet optimization. |
+| **O5: Control Bridge** | ⏳ Pending | Awaiting final model. |
 
 ---
 
@@ -64,12 +62,12 @@ We scientifically determined the optimal decision boundary ($\tau$) using F1-Sco
 ```bash
 python -m src.build_memory_bank
 
-**2. Evaluate (Generate Scores):**
+2. Evaluate (Generate Scores):
 Bash
 
 python -m src.evaluate
 
-**3. Optimize Threshold:** 
+3. Profile Latency:
 Bash
 
-python -m src.optimize_threshold
+python -m src.profile_latency
