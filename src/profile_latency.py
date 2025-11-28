@@ -5,31 +5,29 @@ import faiss
 from src.models import get_feature_extractor
 
 # --- Configuration ---
-RESOLUTION = 256
+# ⚡ OPTIMIZATION: 128x128
+RESOLUTION = 128
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 CATEGORY = "bottle"
-# ⚡ OPTIMIZATION: ResNet-18 Dimensions
-RAW_FEATURE_DIM = 448 
+MODEL_NAME = "tf_mobilenetv3_large_100"
+RAW_FEATURE_DIM = 176 
 
 def load_components():
-    print(f"Loading ResNet-18 and memory bank...")
+    print(f"Loading {MODEL_NAME} and raw memory bank...")
     model = get_feature_extractor().to(DEVICE)
     model.eval()
     
     bank_path = f"models/{CATEGORY}_patch_memory_bank.index"
-    projector_path = f"models/{CATEGORY}_patch_projector.pth"
-    
     index = faiss.read_index(bank_path)
-    projector = torch.load(projector_path, weights_only=False)
     
-    return model, index, projector
+    return model, index
 
 def profile_inference():
-    model, index, projector = load_components()
+    model, index = load_components()
     
     dummy_input = torch.randn(1, 3, RESOLUTION, RESOLUTION).to(DEVICE)
     
-    print(f"\n🚀 Profiling Latency for ResNet-18 (Target: < 100ms)...")
+    print(f"\n🚀 Profiling Latency for MobileNetV3 (128x128) (Target: < 100ms)...")
     print("Warming up GPU...")
     for _ in range(10):
         with torch.no_grad(): _ = model(dummy_input)
@@ -50,11 +48,8 @@ def profile_inference():
             H, W = patch_features.shape[2:]
             patch_vectors = patch_features.permute(0, 2, 3, 1).reshape(-1, RAW_FEATURE_DIM).cpu().numpy()
             
-            # 3. Projection
-            projected_vectors = projector.transform(patch_vectors).astype(np.float32)
-            
-            # 4. Search
-            D, _ = index.search(projected_vectors, 1)
+            # 3. Search (Raw Vectors)
+            D, _ = index.search(patch_vectors, 1)
             score = np.max(D)
             
         torch.cuda.synchronize() 
@@ -62,7 +57,7 @@ def profile_inference():
         latencies.append((end_time - start_time) * 1000)
 
     avg_latency = np.mean(latencies)
-    print(f"\n📊 Results (ResNet-18):")
+    print(f"\n📊 Results (MobileNetV3 128x128):")
     print(f"   Average Latency: {avg_latency:.2f} ms")
     print(f"   Throughput:      {1000/avg_latency:.2f} FPS")
     

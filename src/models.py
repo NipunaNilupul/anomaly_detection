@@ -4,17 +4,18 @@ import torch.nn.functional as F
 from timm import create_model
 
 # ==========================================
-# 1. SOTA Feature Extractor (Patch-Based)
+# 1. SOTA Feature Extractor (MobileNetV3)
 # ==========================================
-def get_feature_extractor(model_name="resnet18", pretrained=True):
+def get_feature_extractor(model_name="tf_mobilenetv3_large_100", pretrained=True):
     """
-    Loads a pre-trained ResNet-18 and extracts intermediate feature maps
-    as spatial patches.
+    Loads a pre-trained MobileNetV3-Large.
+    OPTIMIZED for extreme speed (<100ms latency).
     """
     model = create_model(
         model_name,
         pretrained=pretrained,
         features_only=True,
+        # 💡 FIX: Use layers 1, 2, 3 (Total 176 channels) for max speed and safety
         out_indices=[1, 2, 3] 
     )
     model.eval()
@@ -27,7 +28,7 @@ def get_feature_extractor(model_name="resnet18", pretrained=True):
         def forward(self, x):
             features = self.model(x)
             
-            # Align features to Layer 3 size (16x16 for 256 input)
+            # Align features to the smallest feature map (Layer 3)
             target_size = features[-1].shape[2:] 
             
             resized_features = [
@@ -35,7 +36,7 @@ def get_feature_extractor(model_name="resnet18", pretrained=True):
                 for f in features
             ]
             
-            # ResNet18: 64 + 128 + 256 = 448 channels
+            # MobileNetV3 layers 1+2+3: 24 + 40 + 112 = 176 channels
             patch_features = torch.cat(resized_features, dim=1)
             
             return patch_features

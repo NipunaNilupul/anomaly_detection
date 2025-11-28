@@ -12,34 +12,26 @@ from src.models import get_feature_extractor
 from src.utils import compute_aupro, compute_image_auroc
 
 # --- Configuration ---
-RESOLUTION = 256
+# ⚡ OPTIMIZATION: 128x128
+RESOLUTION = 128
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 GAUSSIAN_SIGMA = 4.0
 IMAGENET_NORM = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 
-def load_memory_bank_and_projector(category="bottle"):
+def load_memory_bank(category="bottle"):
     bank_path = f"models/{category}_patch_memory_bank.index"
-    projector_path = f"models/{category}_patch_projector.pth"
-    
     if not os.path.exists(bank_path):
         raise FileNotFoundError(f"Memory bank not found: {bank_path}. Run build_memory_bank.py first.")
         
     print(f"Loading patch memory bank from {bank_path}")
-    index = faiss.read_index(bank_path)
-    
-    print(f"Loading projector from {projector_path}")
-    projector = torch.load(projector_path)
-    
-    return index, projector
+    return faiss.read_index(bank_path)
 
 def evaluate_category_features(category="bottle"):
-    print(f"\n🚀 Starting PATCH-LEVEL evaluation for '{category}' (ResNet-18)...")
+    print(f"\n🚀 Starting PATCH-LEVEL evaluation for '{category}' (128x128)...")
     
     model = get_feature_extractor().to(DEVICE)
-    index, projector = load_memory_bank_and_projector(category)
-    
-    # ⚡ OPTIMIZATION: Updated for ResNet-18
-    raw_feature_dim = 448 
+    index = load_memory_bank(category)
+    raw_feature_dim = 176 
 
     test_dir = Path("data/mvtec_ad") / category / "test"
     gt_dir = Path("data/mvtec_ad") / category / "ground_truth"
@@ -69,8 +61,7 @@ def evaluate_category_features(category="bottle"):
                 patch_vectors = patch_features.permute(0, 2, 3, 1).reshape(H * W, raw_feature_dim)
                 patch_vectors_np = patch_vectors.cpu().numpy()
 
-            projected_patch_vectors = projector.transform(patch_vectors_np).astype(np.float32)
-            D, I = index.search(projected_patch_vectors, 1) 
+            D, I = index.search(patch_vectors_np, 1) 
             
             anomaly_map_hw = D.reshape(H, W)
             anomaly_map_full = T.Resize(
@@ -104,7 +95,7 @@ def evaluate_category_features(category="bottle"):
     pixel_aupro = compute_aupro(anomaly_maps, gt_masks)
     image_auroc = compute_image_auroc(image_scores, image_labels)
     
-    print(f"\n📊 {category.upper()} (Patch-Level)")
+    print(f"\n📊 {category.upper()} (Patch-Level 128x128)")
     print(f"   Pixel AUPRO: {pixel_aupro:.4f}")
     print(f"   Image AUROC: {image_auroc:.4f}")
     return pixel_aupro, image_auroc

@@ -32,4 +32,106 @@ Evaluating good: 100%|███████████████████�
    Pixel AUPRO: 0.9455
    Image AUROC: 1.0000
 (venv) prime@prime-G3-3500:~/projects/anomaly_detection_SOTA$ 
+(venv) prime@prime-G3-3500:~/projects/anomaly_detection_SOTA$ nano src/optimize_threshold.py
+(venv) prime@prime-G3-3500:~/projects/anomaly_detection_SOTA$ python -m src.optimize_threshold
+
+🚀 Optimizing Threshold for 'bottle'...
+/home/prime/projects/anomaly_detection_SOTA/src/optimize_threshold.py:28: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  projector = torch.load(projector_path)
+Collecting anomaly scores...
+broken_large: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 20/20 [00:23<00:00,  1.18s/it]
+broken_small: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 22/22 [00:25<00:00,  1.15s/it]
+contamination: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 21/21 [00:24<00:00,  1.16s/it]
+good: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 20/20 [00:22<00:00,  1.13s/it]
+
+✅ Optimization Complete for 'bottle'
+   Optimal Threshold (tau): 4202.094727
+   Max F1-Score:           1.0000
+(venv) prime@prime-G3-3500:~/projects/anomaly_detection_SOTA$ 
+(venv) prime@prime-G3-3500:~/projects/anomaly_detection_SOTA$ nano src/profile_latency.py
+(venv) prime@prime-G3-3500:~/projects/anomaly_detection_SOTA$ python -m src.profile_latency
+Loading model and memory bank...
+
+🚀 Starting Latency Profiling (Target: < 100ms)...
+Warming up GPU...
+Running 100 inference cycles...
+
+📊 Latency Results:
+   Average Latency: 1033.79 ms
+   Min Latency:     1003.86 ms
+   Max Latency:     1255.54 ms
+   Throughput:      0.97 FPS
+
+⚠️ WARNING: System is too slow (> 100ms). Optimization needed.
+(venv) prime@prime-G3-3500:~/projects/anomaly_detection_SOTA$ 
+
+
+(venv) prime@prime-G3-3500:~/projects/anomaly_detection_SOTA$ rm models/bottle_patch*
+(venv) prime@prime-G3-3500:~/projects/anomaly_detection_SOTA$ python -m src.build_memory_bank
+🚀 Starting memory bank build for 'bottle' (ResNet-18) on cuda
+model.safetensors: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 46.8M/46.8M [00:09<00:00, 5.19MB/s]
+Extracting patch features...
+Extracting: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 14/14 [00:06<00:00,  2.13it/s]
+Total patches: 53504
+Fitting projector (Dim: 448 -> 256)...
+Building FAISS index...
+Indexing: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 2/2 [00:00<00:00,  2.25it/s]
+✅ Fast memory bank build complete.
+(venv) prime@prime-G3-3500:~/projects/anomaly_detection_SOTA$ python -m src.profile_latency
+Loading ResNet-18 and memory bank...
+
+🚀 Profiling Latency for ResNet-18 (Target: < 100ms)...
+Warming up GPU...
+Running 100 cycles...
+
+📊 Results (ResNet-18):
+   Average Latency: 275.95 ms
+   Throughput:      3.62 FPS
+
+⚠️ WARNING: Still too slow.
+(venv) prime@prime-G3-3500:~/projects/anomaly_detection_SOTA$ 
+
+
+(venv) prime@prime-G3-3500:~/projects/anomaly_detection_SOTA$ rm models/bottle_patch*
+(venv) prime@prime-G3-3500:~/projects/anomaly_detection_SOTA$ python -m src.build_memory_bank
+🚀 Starting memory bank build for 'bottle' (MobileNetV3) on cuda
+Unexpected keys (classifier.bias, classifier.weight, conv_head.bias, conv_head.weight) found while loading pretrained weights. This may be expected if model is being adapted.
+Extracting patch features...
+Extracting: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 14/14 [00:05<00:00,  2.38it/s]
+Total patches: 53504
+Fitting projector (Dim: 176 -> 128)...
+Building FAISS index...
+Indexing: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 2/2 [00:00<00:00,  6.59it/s]
+✅ MobileNet memory bank build complete.
+(venv) prime@prime-G3-3500:~/projects/anomaly_detection_SOTA$ python -m src.profile_latency
+Loading tf_mobilenetv3_large_100 and memory bank...
+Unexpected keys (classifier.bias, classifier.weight, conv_head.bias, conv_head.weight) found while loading pretrained weights. This may be expected if model is being adapted.
+
+🚀 Profiling Latency for MobileNetV3 (Target: < 100ms)...
+Warming up GPU...
+Running 100 cycles...
+
+📊 Results (MobileNetV3):
+   Average Latency: 173.54 ms
+   Throughput:      5.76 FPS
+
+⚠️ WARNING: Still too slow.
+(venv) prime@prime-G3-3500:~/projects/anomaly_detection_SOTA$ python -m src.evaluate
+
+🚀 Starting PATCH-LEVEL evaluation for 'bottle' (MobileNetV3)...
+Unexpected keys (classifier.bias, classifier.weight, conv_head.bias, conv_head.weight) found while loading pretrained weights. This may be expected if model is being adapted.
+Loading patch memory bank from models/bottle_patch_memory_bank.index
+Loading projector from models/bottle_patch_projector.pth
+/home/prime/projects/anomaly_detection_SOTA/src/evaluate.py:31: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  projector = torch.load(projector_path)
+Evaluating broken_large: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 20/20 [00:06<00:00,  2.97it/s]
+Evaluating broken_small: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 22/22 [00:06<00:00,  3.35it/s]
+Evaluating contamination: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 21/21 [00:06<00:00,  3.36it/s]
+Evaluating good: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 20/20 [00:06<00:00,  3.28it/s]
+
+📊 BOTTLE (MobileNetV3 Patch-Level)
+   Pixel AUPRO: 0.9635
+   Image AUROC: 1.0000
+(venv) prime@prime-G3-3500:~/projects/anomaly_detection_SOTA$ 
+
 
