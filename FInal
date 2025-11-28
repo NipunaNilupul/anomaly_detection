@@ -1,0 +1,44 @@
+# Real-Time Anomaly Scoring for Industrial Pass/Fail Control
+*Masters Project - Completed (NipunaNilupul)*
+
+This project successfully developed a high-performance, real-time anomaly detection system for industrial inspection. It documents the architectural evolution from Autoencoders to Patch-Based Feature Extraction to meet accuracy (>0.90 AUPRO) and latency (<100ms) targets.
+
+---
+
+## 🚀 Final Research Results (Mission Accomplished)
+
+We successfully developed a system that balances accuracy and speed using a **MobileNetV3-Large** backbone with **Patch-Based Feature Memory**.
+
+### 1. Comparative Performance (Bottle Category)
+
+| Model Architecture | Pass/Fail (AUROC) | Localization (AUPRO) | Latency (ms) | Status |
+| :--- | :--- | :--- | :--- | :--- |
+| **CAE (Baseline)** | 0.6532 | 0.2056 | ~20ms | ❌ Accuracy Failure |
+| **Wide-ResNet-50** | **1.0000** | **0.9455** | 1033ms | ❌ Latency Failure |
+| **ResNet-18** | **1.0000** | **0.9455** | 276ms | ❌ Latency Failure |
+| **MobileNetV3 (128px)**| **0.9984** | **0.9333** | **38.63ms** | ✅ **COMPLETE SUCCESS** |
+
+**Conclusion:** The MobileNetV3 (128x128) configuration meets all industrial requirements.
+
+### 2. Threshold Optimization (Objective O3)
+* **Optimal Threshold ($\tau$):** `3288.27`
+* **F1-Score:** 0.9920 (High Reliability).
+
+### 3. Latency Profiling (Objective O4)
+* **Achieved:** 38.63ms per image (25 FPS).
+* **Target:** < 100ms.
+* **Result:** Passed with 60ms headroom.
+
+### 4. Control Bridge (Objective O5)
+* A Python module (`src/control_bridge.py`) has been developed to load the model and threshold, providing a Boolean `Pass/Fail` signal for PLC integration.
+
+---
+
+## 📂 Project Structure
+
+* `src/models.py`: Contains the SOTA Feature Extractor (MobileNetV3) and legacy CAE/VAE models.
+* `src/build_memory_bank.py`: "Trains" the model by extracting normal patch features into a FAISS memory bank.
+* `src/evaluate.py`: Performs patch-level anomaly scoring and generates localization maps.
+* `src/optimize_threshold.py`: Calculates the optimal $\tau$ for the Pass/Fail controller.
+* `src/profile_latency.py`: Measures end-to-end inference speed (ms) and throughput (FPS).
+* `src/control_bridge.py`: **Final Production Module** for real-time inference.
