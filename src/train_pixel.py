@@ -25,7 +25,7 @@ def train_pixel_model(model_type="cae", category="bottle", latent_dim=512, batch
     
     optimizer = torch.optim.Adam(model.parameters(), lr=lr) 
     
-    print(f"\n🚀 Starting PIXEL-BASED {model_type.upper()} training on '{category}'")
+    print(f"\n Starting PIXEL-BASED {model_type.upper()} training on '{category}'")
     
     best_val_loss = float('inf')
     for epoch in range(num_epochs):

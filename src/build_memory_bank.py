@@ -7,13 +7,13 @@ from src.dataloader import MVTecADTrainDataset
 from src.models import get_feature_extractor
 
 # --- Configuration ---
-# ⚡ OPTIMIZATION: Reduce resolution to 128x128 for 4x speedup
+# resolution 128x128 for 4x speedup
 RESOLUTION = 128 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 RAW_FEATURE_DIM = 176 # MobileNetV3 Layers 1+2+3
 
 def build_memory_bank(category="bottle"):
-    print(f"🚀 Starting RAW memory bank build for '{category}' (128x128) on {DEVICE}")
+    print(f" Starting RAW memory bank build for '{category}' (128x128) on {DEVICE}")
     
     model = get_feature_extractor().to(DEVICE)
     dataset = MVTecADTrainDataset("data/mvtec_ad", category, img_size=RESOLUTION)

@@ -9,7 +9,7 @@ from sklearn.metrics import precision_recall_curve
 from src.models import get_feature_extractor
 
 # --- Configuration ---
-# ⚡ OPTIMIZATION: 128x128
+# 128x128
 RESOLUTION = 128
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 IMAGENET_NORM = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])

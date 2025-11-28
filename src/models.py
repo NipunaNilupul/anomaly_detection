@@ -15,7 +15,7 @@ def get_feature_extractor(model_name="tf_mobilenetv3_large_100", pretrained=True
         model_name,
         pretrained=pretrained,
         features_only=True,
-        # 💡 FIX: Use layers 1, 2, 3 (Total 176 channels) for max speed and safety
+        # I uswd layers 1, 2, 3 (Total 176 channels) for max speed and safety
         out_indices=[1, 2, 3] 
     )
     model.eval()
@@ -43,9 +43,9 @@ def get_feature_extractor(model_name="tf_mobilenetv3_large_100", pretrained=True
 
     return PatchFeatureExtractor(model)
 
-# ==========================================
+# ============c==============================xcc
 # 2. Pixel-Based Models (Legacy)
-# ==========================================
+# ====================s====================
 class Encoder(nn.Module):
     def __init__(self, latent_dim=512):
         super().__init__()

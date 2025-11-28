@@ -11,8 +11,8 @@ from scipy.ndimage import gaussian_filter
 from src.models import get_feature_extractor
 from src.utils import compute_aupro, compute_image_auroc
 
-# --- Configuration ---
-# ⚡ OPTIMIZATION: 128x128
+# Configuration 
+# 128x128
 RESOLUTION = 128
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 GAUSSIAN_SIGMA = 4.0

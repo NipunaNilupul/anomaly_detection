@@ -5,7 +5,7 @@ import faiss
 from src.models import get_feature_extractor
 
 # --- Configuration ---
-# ⚡ OPTIMIZATION: 128x128
+# 128x128
 RESOLUTION = 128
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 CATEGORY = "bottle"
