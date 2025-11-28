@@ -51,7 +51,7 @@ We have successfully balanced the "Iron Triangle" of computer vision: Speed, Acc
 | **O2: Compare Models** | ✅ Done | Feature-Based (MobileNet) >> Pixel-Based (CAE). |
 | **O3: Thresholding** | ✅ Done | Optimal $\tau$ (`3288.27`) found via F1-max (F1=0.99). |
 | **O4: Real-Time (<100ms)** | ✅ Done | Achieved **38.63ms** latency. |
-| **O5: Control Bridge** | ✅ Done | Implemented `control_bridge.py` for PLC simulation. |
+| **O5: Control Bridge** | Pending | Implemented `control_bridge.py` for PLC simulation. |
 
 ---
 
