@@ -133,5 +133,112 @@ Evaluating good: 100%|███████████████████�
    Pixel AUPRO: 0.9635
    Image AUROC: 1.0000
 (venv) prime@prime-G3-3500:~/projects/anomaly_detection_SOTA$ 
+prime@prime-G3-3500:~$ cd projects
+prime@prime-G3-3500:~/projects$ ls
+anomaly_detection_003       anomaly_detection_clean    anomaly_detection_SOTA
+anomaly_detection_advanced  anomaly_detection_masters  token
+prime@prime-G3-3500:~/projects$ cd anomaly_detection_SOTA
+prime@prime-G3-3500:~/projects/anomaly_detection_SOTA$ ls
+data  Log.txt  models  README.md  results  src  venv
+prime@prime-G3-3500:~/projects/anomaly_detection_SOTA$ source venv/bin/activate
+(venv) prime@prime-G3-3500:~/projects/anomaly_detection_SOTA$ rm models/bottle_patch*
+(venv) prime@prime-G3-3500:~/projects/anomaly_detection_SOTA$ python -m src.build_memory_bank
+🚀 Starting memory bank build for 'bottle' (MobileNetV3) on cuda
+Unexpected keys (classifier.bias, classifier.weight, conv_head.bias, conv_head.weight) found while loading pretrained weights. This may be expected if model is being adapted.
+Extracting patch features...
+Extracting: 100%|███████████████████████████████| 14/14 [00:06<00:00,  2.09it/s]
+Total patches: 53504
+Fitting projector (Dim: 176 -> 128)...
+Building FAISS index...
+Indexing: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 2/2 [00:00<00:00,  6.26it/s]
+✅ MobileNet memory bank build complete.
+(venv) prime@prime-G3-3500:~/projects/anomaly_detection_SOTA$ python -m src.profile_latency
+Loading tf_mobilenetv3_large_100 and memory bank...
+Unexpected keys (classifier.bias, classifier.weight, conv_head.bias, conv_head.weight) found while loading pretrained weights. This may be expected if model is being adapted.
+
+🚀 Profiling Latency for MobileNetV3 (Target: < 100ms)...
+Warming up GPU...
+Running 100 cycles...
+
+📊 Results (MobileNetV3):
+   Average Latency: 180.27 ms
+   Throughput:      5.55 FPS
+
+⚠️ WARNING: Still too slow.
+(venv) prime@prime-G3-3500:~/projects/anomaly_detection_SOTA$ rm models/bottle_patch*
+(venv) prime@prime-G3-3500:~/projects/anomaly_detection_SOTA$ python -m src.build_memory_bank
+🚀 Starting RAW memory bank build for 'bottle' (MobileNetV3) on cuda
+Unexpected keys (classifier.bias, classifier.weight, conv_head.bias, conv_head.weight) found while loading pretrained weights. This may be expected if model is being adapted.
+Extracting patch features...
+Extracting: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 14/14 [00:06<00:00,  2.22it/s]
+Total patches: 53504
+Building FAISS index (Dim: 176)...
+Indexing: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 2/2 [00:00<00:00, 19.03it/s]
+✅ Raw memory bank build complete.
+(venv) prime@prime-G3-3500:~/projects/anomaly_detection_SOTA$ python -m src.profile_latency
+Loading tf_mobilenetv3_large_100 and raw memory bank...
+Unexpected keys (classifier.bias, classifier.weight, conv_head.bias, conv_head.weight) found while loading pretrained weights. This may be expected if model is being adapted.
+
+🚀 Profiling Latency for MobileNetV3 RAW (Target: < 100ms)...
+Warming up GPU...
+Running 100 cycles...
+
+📊 Results (MobileNetV3 Raw):
+   Average Latency: 213.20 ms
+   Throughput:      4.69 FPS
+
+⚠️ WARNING: Still too slow.
+(venv) prime@prime-G3-3500:~/projects/anomaly_detection_SOTA$ 
+
+(venv) prime@prime-G3-3500:~/projects/anomaly_detection_SOTA$ rm models/bottle_patch*
+(venv) prime@prime-G3-3500:~/projects/anomaly_detection_SOTA$ python -m src.build_memory_bank
+🚀 Starting RAW memory bank build for 'bottle' (128x128) on cuda
+Unexpected keys (classifier.bias, classifier.weight, conv_head.bias, conv_head.weight) found while loading pretrained weights. This may be expected if model is being adapted.
+Extracting patch features...
+Extracting: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 14/14 [00:05<00:00,  2.39it/s]
+Total patches: 13376
+Building FAISS index (Dim: 176)...
+Indexing: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1/1 [00:00<00:00, 78.55it/s]
+✅ Memory bank build complete.
+(venv) prime@prime-G3-3500:~/projects/anomaly_detection_SOTA$ python -m src.profile_latency
+Loading tf_mobilenetv3_large_100 and raw memory bank...
+Unexpected keys (classifier.bias, classifier.weight, conv_head.bias, conv_head.weight) found while loading pretrained weights. This may be expected if model is being adapted.
+
+🚀 Profiling Latency for MobileNetV3 (128x128) (Target: < 100ms)...
+Warming up GPU...
+Running 100 cycles...
+
+📊 Results (MobileNetV3 128x128):
+   Average Latency: 38.63 ms
+   Throughput:      25.89 FPS
+
+✅ SUCCESS: Real-time requirement met (< 100ms)!
+(venv) prime@prime-G3-3500:~/projects/anomaly_detection_SOTA$ python -m src.evaluate
+
+🚀 Starting PATCH-LEVEL evaluation for 'bottle' (128x128)...
+Unexpected keys (classifier.bias, classifier.weight, conv_head.bias, conv_head.weight) found while loading pretrained weights. This may be expected if model is being adapted.
+Loading patch memory bank from models/bottle_patch_memory_bank.index
+Evaluating broken_large: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 20/20 [00:03<00:00,  6.03it/s]
+Evaluating broken_small: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 22/22 [00:02<00:00,  8.08it/s]
+Evaluating contamination: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 21/21 [00:02<00:00,  8.14it/s]
+Evaluating good: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 20/20 [00:02<00:00,  8.54it/s]
+
+📊 BOTTLE (Patch-Level 128x128)
+   Pixel AUPRO: 0.9333
+   Image AUROC: 0.9984
+(venv) prime@prime-G3-3500:~/projects/anomaly_detection_SOTA$ python -m src.optimize_threshold
+
+🚀 Optimizing Threshold for 'bottle' (128x128)...
+Unexpected keys (classifier.bias, classifier.weight, conv_head.bias, conv_head.weight) found while loading pretrained weights. This may be expected if model is being adapted.
+Collecting anomaly scores...
+broken_large: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 20/20 [00:02<00:00,  6.70it/s]
+broken_small: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 22/22 [00:02<00:00,  9.00it/s]
+contamination: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 21/21 [00:02<00:00,  9.05it/s]
+good: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 20/20 [00:02<00:00,  9.07it/s]
+
+✅ Optimization Complete for 'bottle'
+   Optimal Threshold (tau): 3288.270508
+   Max F1-Score:           0.9920
+(venv) prime@prime-G3-3500:~/projects/anomaly_detection_SOTA$ 
 
 
