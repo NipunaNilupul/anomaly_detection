@@ -1,0 +1,1165 @@
+==============================================================================
+FILE 1: src/models.py
+DESCRIPTION: Neural network definitions (MobileNetV3 Wrapper, CAE, VAE)
+==============================================================================
+
+import torch  # The core PyTorch library for tensor computations and automatic gradients
+import torch.nn as nn  # Submodule containing neural network layers (Conv2d, Linear, etc.)
+import torch.nn.functional as F  # Functional interface for activations (ReLU, Sigmoid) and loss functions
+from timm import create_model  # "PyTorch Image Models" library: Used to load the pre-trained MobileNetV3
+
+
+# 1. SOTA Feature Extractor (MobileNetV3)
+
+def get_feature_extractor(model_name="tf_mobilenetv3_large_100", pretrained=True):
+    """
+    Loads a pre-trained MobileNetV3-Large.
+    OPTIMIZED for extreme speed (<100ms latency).
+    """
+    # Create the MobileNetV3 model using timm
+    model = create_model(
+        model_name,
+        pretrained=pretrained,  # Load ImageNet weights (critical for transfer learning)
+        features_only=True,     # Remove the classification head (we only want feature maps)
+        # Extract features from layers 1, 2, and 3. 
+        # Layer 0 is too shallow (edges only), Layer 4 is too deep/slow. 1-3 is the "Goldilocks" zone.
+        out_indices=[1, 2, 3]   
+    )
+    model.eval()  # Set to evaluation mode (freezes BatchNorm stats and disables Dropout)
+
+    # Define a custom wrapper class to handle resizing and concatenation automatically
+    class PatchFeatureExtractor(nn.Module):
+        def __init__(self, model):
+            super().__init__()
+            self.model = model  # Store the timm MobileNet backbone
+        
+        def forward(self, x):
+            # Pass input image through MobileNet to get a list of feature maps [f1, f2, f3]
+            features = self.model(x)
+            
+            # Identify the spatial size of the smallest feature map (deepest layer)
+            # We align everything to this size so we can stack them.
+            target_size = features[-1].shape[2:] 
+            
+            # Iterate through all feature maps and resize them to 'target_size'
+            resized_features = [
+                F.interpolate(f, size=target_size, mode='bilinear', align_corners=False)
+                for f in features
+            ]
+            
+            # Concatenate features along the channel dimension (dim=1)
+            # MobileNetV3 Large layers 1+2+3 have 24 + 40 + 112 = 176 channels total.
+            # This rich feature vector describes the texture at that patch location.
+            patch_features = torch.cat(resized_features, dim=1)
+            
+            return patch_features  # Returns tensor of shape [Batch, 176, H, W]
+
+    return PatchFeatureExtractor(model)  # Return the instantiated wrapper
+
+
+# 2. Pixel-Based Models (Legacy)
+
+# Standard Convolutional Encoder: Compresses 256x256 image into a small vector
+class Encoder(nn.Module):
+    def __init__(self, latent_dim=512):
+        super().__init__()
+        # Layer 1: 3 input channels (RGB) -> 32 filters. Stride 2 halves resolution (256->128).
+        self.conv1 = nn.Conv2d(3, 32, 4, 2, 1)
+        # Layer 2: 32 -> 64 filters. Resolution becomes 64x64.
+        self.conv2 = nn.Conv2d(32, 64, 4, 2, 1)
+        # Layer 3: 64 -> 128 filters. Resolution becomes 32x32.
+        self.conv3 = nn.Conv2d(64, 128, 4, 2, 1)
+        # Layer 4: 128 -> 256 filters. Resolution becomes 16x16.
+        self.conv4 = nn.Conv2d(128, 256, 4, 2, 1) 
+        # Fully Connected Layer: Flattens the 16x16x256 tensor into the latent vector 'z'
+        self.fc = nn.Linear(256 * 16 * 16, latent_dim) 
+
+    def forward(self, x):
+        # Apply Convolutions + ReLU activations
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
+        x = F.relu(self.conv3(x))
+        x = F.relu(self.conv4(x))
+        
+        # Save batch size for reshaping
+        batch_size = x.size(0)
+        # Flatten and pass through linear layer to get the Latent Vector
+        return self.fc(x.view(batch_size, -1))
+
+# Standard Convolutional Decoder: Reconstructs image from latent vector
+class Decoder(nn.Module):
+    def __init__(self, latent_dim=512):
+        super().__init__()
+        # Expand latent vector back to spatial dimensions (256 * 16 * 16)
+        self.fc = nn.Linear(latent_dim, 256 * 16 * 16)
+        # Transposed Convolutions (Deconvolutions) to upscale resolution
+        self.deconv1 = nn.ConvTranspose2d(256, 128, 4, 2, 1) # 16x16 -> 32x32
+        self.deconv2 = nn.ConvTranspose2d(128, 64, 4, 2, 1)  # 32x32 -> 64x64
+        self.deconv3 = nn.ConvTranspose2d(64, 32, 4, 2, 1)   # 64x64 -> 128x128
+        self.deconv4 = nn.ConvTranspose2d(32, 3, 4, 2, 1)    # 128x128 -> 256x256 (3 channels)
+
+    def forward(self, z):
+        # Project latent vector and reshape into a 3D tensor
+        x = self.fc(z).view(-1, 256, 16, 16)
+        # Apply Upscaling layers
+        x = F.relu(self.deconv1(x))
+        x = F.relu(self.deconv2(x))
+        x = F.relu(self.deconv3(x))
+        # Sigmoid activation ensures output pixels are between 0.0 and 1.0
+        return torch.sigmoid(self.deconv4(x))
+
+# Convolutional Autoencoder (CAE) Wrapper
+class CAE(nn.Module):
+    def __init__(self, latent_dim=512):
+        super().__init__()
+        self.encoder = Encoder(latent_dim) # Instantiate Encoder
+        self.decoder = Decoder(latent_dim) # Instantiate Decoder
+        
+    def forward(self, x):
+        # Standard pass: Encode Input -> Latent Code -> Decode Reconstruction
+        return self.decoder(self.encoder(x))
+
+# Variational Autoencoder (VAE)
+class VAE(nn.Module):
+    def __init__(self, latent_dim=512):
+        super().__init__()
+        self.latent_dim = latent_dim
+        # Convolutional layers identical to Encoder above
+        self.conv1 = nn.Conv2d(3, 32, 4, 2, 1)
+        self.conv2 = nn.Conv2d(32, 64, 4, 2, 1)
+        self.conv3 = nn.Conv2d(64, 128, 4, 2, 1)
+        self.conv4 = nn.Conv2d(128, 256, 4, 2, 1)
+        
+        # The Key Difference: VAE learns a probability distribution (Mean + Variance)
+        # Instead of one FC layer, we have two:
+        self.fc_mu = nn.Linear(256 * 16 * 16, latent_dim)      # Predicts Mean
+        self.fc_logvar = nn.Linear(256 * 16 * 16, latent_dim)  # Predicts Log-Variance
+        
+        self.decoder = Decoder(latent_dim) # Reuse the same decoder
+
+    def encode(self, x):
+        # Run convolutions
+        h = F.relu(self.conv1(x))
+        h = F.relu(self.conv2(h))
+        h = F.relu(self.conv3(h))
+        h = F.relu(self.conv4(h))
+        h = h.view(h.size(0), -1) # Flatten
+        # Output the parameters of the Gaussian distribution
+        return self.fc_mu(h), self.fc_logvar(h)
+
+    def reparameterize(self, mu, logvar):
+        """
+        The 'Reparameterization Trick': Allows backprop through random sampling.
+        z = mu + sigma * epsilon
+        """
+        std = torch.exp(0.5 * logvar) # Convert log-variance to standard deviation
+        return mu + torch.randn_like(std) * std # Add random noise
+
+    def forward(self, x):
+        mu, logvar = self.encode(x) # Get distribution params
+        z = self.reparameterize(mu, logvar) # Sample latent vector
+        return self.decoder(z), mu, logvar # Return recon AND params (for loss calculation)
+
+# CAE Loss Function
+def cae_loss(recon, x):
+    # Uses L1 Loss (Mean Absolute Error) for sharper edges than MSE
+    return F.l1_loss(recon, x, reduction='mean')
+
+# VAE Loss Function
+def vae_loss(recon, x, mu, logvar):
+    # 1. Reconstruction Loss (L1) - How well does it look like the input?
+    recon_loss = F.l1_loss(recon, x, reduction='mean') 
+    
+    # 2. KL Divergence - Forces the latent space to be a standard Normal distribution
+    # This acts as a regularizer but causes the "blurriness" observed in your thesis.
+    kl_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+    
+    # Total loss is sum of both
+    return recon_loss + kl_loss, recon_loss, kl_loss
+
+
+==============================================================================
+FILE 2: src/dataloader.py
+DESCRIPTION: Custom PyTorch Dataset loader with ImageNet Normalization
+==============================================================================
+
+from pathlib import Path  # Modern library for handling file paths (works on Windows/Linux/Mac automatically)
+from torch.utils.data import Dataset, DataLoader  # Base classes for creating efficient data pipelines in PyTorch
+from PIL import Image  # Library to load images from disk
+import torchvision.transforms as T  # Library for image preprocessing (resizing, normalizing)
+
+class MVTecADTrainDataset(Dataset):
+    """
+    Custom Dataset class that Loads ONLY defect-free images (MVTec AD train/good).
+    This is critical for Unsupervised Learning: the model must only see 'normal' data during training.
+    """
+    def __init__(self, root_dir: str, category: str, img_size: int = 256):
+        self.root_dir = Path(root_dir)  # Converts string path to a Path object for easier manipulation
+        self.category = category  # Stores the category name (e.g., "bottle")
+        self.img_size = img_size  # Stores target resolution (e.g., 128 or 256)
+        
+        # Constructs the specific path to the 'good' training data
+        # MVTec AD structure is: root/category/train/good
+        self.good_dir = self.root_dir / category / "train" / "good"
+        
+        # Fail-Fast Check: Verifies the directory actually exists before trying to load anything
+        if not self.good_dir.exists():
+            raise FileNotFoundError(f"Training directory not found: {self.good_dir}")
+        
+        # 1. Recursive Search (rglob): Finds files even in subfolders
+        # 2. Filtering: Only keeps actual images (.png, .jpg), ignoring system files like .DS_Store
+        # 3. Sorted: Sorts files alphabetically to ensure the order is deterministic (reproducible)
+        self.image_paths = sorted(p for p in self.good_dir.rglob("*") 
+                                 if p.suffix.lower() in [".png", ".jpg", ".jpeg"])
+        
+        # Check if directory was empty
+        if not self.image_paths:
+            raise ValueError(f"No images found in {self.good_dir}")
+        
+        # Define the Preprocessing Pipeline
+        # This matches the training configuration of MobileNetV3 (ImageNet stats)
+        self.transform = T.Compose([
+            T.Resize((img_size, img_size)),  # Resizes image to square resolution
+            T.ToTensor(),  # Converts pixel values [0-255] to Tensor [0.0-1.0]
+            # Normalizes using standard ImageNet mean/std. Critical for pre-trained models.
+            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
+
+    def __len__(self):
+        # Returns the total number of images in the dataset
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+        # 1. Open Image: Loads image from disk based on index
+        # .convert("RGB") ensures 3 channels even if image is Grayscale (prevents crash on 'grid' or 'screw')
+        img = Image.open(self.image_paths[idx]).convert("RGB")
+        
+        # 2. Apply Transforms: Resizes and Normalizes the image
+        img_tensor = self.transform(img)
+        
+        # Returns tuple: (The Image Tensor, The Path String)
+        # Returning path is useful for visualization/debugging later
+        return img_tensor, str(self.image_paths[idx])
+
+def get_train_dataloader(root_dir: str, category: str, batch_size: int = 16, img_size: int = 256):
+    """
+    Factory function to easily create the DataLoader.
+    """
+    # Instantiate the custom dataset
+    dataset = MVTecADTrainDataset(root_dir, category, img_size)
+    
+    # Create DataLoader
+    # shuffle=True: randomization is good for training stability (though less relevant for Feature Extraction)
+    # num_workers=4: Uses 4 CPU cores to load images in parallel (speeds up training)
+    # pin_memory=True: Speeds up transfer of data from CPU RAM to GPU VRAM
+    return DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
+
+
+==============================================================================
+FILE 3: src/utils.py
+DESCRIPTION: Utility functions for AUPRO/AUROC metrics and visualization
+==============================================================================
+
+import os
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.metrics import auc, roc_auc_score
+from scipy.ndimage import gaussian_filter
+
+# FULL LIST of all 15 MVTec AD categories
+MVTEC_CATEGORIES = [
+    'bottle', 'cable', 'capsule', 'carpet', 'grid', 'hazelnut', 
+    'leather', 'metal_nut', 'pill', 'screw', 'tile', 'toothbrush', 
+    'transistor', 'wood', 'zipper'
+]
+
+def compute_pro(anomaly_maps, gt_masks, fpr_thresh=0.3):
+    """Compute Per-Region Overlap (PRO) score."""
+    # Flatten all maps and masks
+    scores = np.concatenate([m.ravel() for m in anomaly_maps])
+    labels = np.concatenate([m.ravel().astype(bool) for m in gt_masks])
+    
+    # Sort by score descending
+    sorted_idx = np.argsort(scores)[::-1]
+    scores = scores[sorted_idx]
+    labels = labels[sorted_idx]
+    
+    num_anom = labels.sum()
+    num_norm = len(labels) - num_anom
+    if num_anom == 0:
+        return 1.0
+    
+    # Calculate TPR and FPR curves
+    tpr = np.cumsum(labels) / num_anom
+    fpr = np.cumsum(~labels) / num_norm
+    
+    # Find the TPR value at the specific FPR threshold
+    valid = np.where(fpr <= fpr_thresh)[0]
+    return tpr[valid[-1]] if len(valid) > 0 else tpr[0]
+
+def compute_aupro(anomaly_maps, gt_masks):
+    """Compute Area Under the PRO curve (AUPRO), integrated over FPR ∈ [0, 0.3]."""
+    if not anomaly_maps: return 0.0
+    fpr_vals = np.linspace(0, 0.3, 50)
+    pro_vals = [compute_pro(anomaly_maps, gt_masks, fpr) for fpr in fpr_vals]
+    return auc(fpr_vals, pro_vals) / 0.3
+
+def compute_image_auroc(scores, labels):
+    """Compute image-level AUROC."""
+    return roc_auc_score(labels, scores)
+
+# --- NEW VISUALIZATION FUNCTION ---
+def save_anomaly_heatmap(image_path, scores, output_path, patch_grid_size=(8, 8)):
+    """
+    Generates and saves a heatmap overlay.
+    
+    Args:
+        image_path (str): Path to the original input image.
+        scores (np.array): Flat array of anomaly scores (distances from FAISS).
+        output_path (str): Where to save the result.
+        patch_grid_size (tuple): The spatial size of your features (e.g. 8x8 for 128px input).
+    """
+    try:
+        # 1. Load Original Image
+        img = cv2.imread(image_path)
+        if img is None:
+            print(f"Warning: Could not load image at {image_path}")
+            return
+            
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        # Resize to match the resolution used in your MobileNet pipeline (128x128)
+        img = cv2.resize(img, (128, 128)) 
+
+        # 2. Reshape Scores to 2D Map
+        # Ensure scores are numpy array
+        if isinstance(scores, list):
+            scores = np.array(scores)
+            
+        # Reshape flat scores (e.g., 64) into grid (e.g., 8x8)
+        anomaly_map = scores.reshape(patch_grid_size)
+
+        # 3. Upsample to Image Size
+        # Resize 8x8 map to 128x128 using Cubic interpolation for smoothness
+        anomaly_map = cv2.resize(anomaly_map, (img.shape[1], img.shape[0]), interpolation=cv2.INTER_CUBIC)
+
+        # 4. Gaussian Blur (Smoothing)
+        # Smooth out blocky artifacts
+        anomaly_map = cv2.GaussianBlur(anomaly_map, (11, 11), 0)
+
+        # 5. Normalize (0 to 1) and Colorize
+        # Normalize relative to this image's min/max to contrast the defect
+        norm_map = (anomaly_map - anomaly_map.min()) / (anomaly_map.max() - anomaly_map.min() + 1e-8)
+        norm_map = (norm_map * 255).astype(np.uint8)
+        
+        # Apply JET Colormap (Blue=Low, Red=High)
+        heatmap = cv2.applyColorMap(norm_map, cv2.COLORMAP_JET)
+        heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
+
+        # 6. Overlay
+        alpha = 0.5 
+        overlay = cv2.addWeighted(img, 1 - alpha, heatmap, alpha, 0)
+
+        # 7. Plot and Save
+        fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+        
+        axes[0].imshow(img)
+        axes[0].set_title("Original Image (128px)")
+        axes[0].axis('off')
+        
+        axes[1].imshow(heatmap)
+        axes[1].set_title("Anomaly Heatmap")
+        axes[1].axis('off')
+        
+        axes[2].imshow(overlay)
+        axes[2].set_title("Localization Overlay")
+        axes[2].axis('off')
+        
+        # Ensure output directory exists
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        
+        plt.tight_layout()
+        plt.savefig(output_path)
+        plt.close(fig) # Close to free memory
+        print(f"Heatmap saved to {output_path}")
+        
+    except Exception as e:
+        print(f"Error generating heatmap for {image_path}: {e}")
+
+
+==============================================================================
+FILE 4: train_pixel_model.py
+DESCRIPTION: Training script for Phase 1 Autoencoder experiments (CAE/VAE)
+==============================================================================
+
+import os  # Standard library for filesystem operations (creating the 'models' folder)
+import torch  # PyTorch: The core library for deep learning tensors and autodiff
+from torch.utils.data import Subset  # Utility to create a smaller dataset from a list of indices (for splitting)
+from sklearn.model_selection import train_test_split  # Scikit-learn tool to randomly split data into Train/Val sets
+from tqdm import tqdm  # Library for the progress bar to track training speed
+from src.dataloader import MVTecADTrainDataset  # Import your custom dataset class
+from src.models import CAE, VAE, cae_loss, vae_loss  # Import your neural architectures and loss functions
+
+def train_pixel_model(model_type="cae", category="bottle", latent_dim=512, batch_size=8, num_epochs=50, lr=1e-4, img_size=256):
+    # Automatically select the GPU if available to speed up training; otherwise CPU
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # Create the directory to save trained model weights. 'exist_ok' prevents crashing if it already exists.
+    os.makedirs("models", exist_ok=True)
+    
+    # 1. Prepare Data
+    # Initialize the custom dataset for the specific category (e.g., 'bottle')
+    dataset = MVTecADTrainDataset("data/mvtec_ad", category, img_size=img_size)
+    
+    # Create a 90/10 Train/Validation split.
+    # Validation is critical to detect overfitting (where the model memorizes inputs instead of learning features).
+    train_idx, val_idx = train_test_split(list(range(len(dataset))), test_size=0.1, random_state=42)
+    
+    # Create PyTorch DataLoaders
+    # Subset: Wraps the dataset with specific indices
+    # shuffle=True (Train): Essential for Stochastic Gradient Descent to work correctly
+    # num_workers=4: Uses parallel CPU cores to load images, preventing GPU starvation
+    train_loader = torch.utils.data.DataLoader(Subset(dataset, train_idx), batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True)
+    # shuffle=False (Val): Order doesn't matter for validation, and it's slightly faster
+    val_loader = torch.utils.data.DataLoader(Subset(dataset, val_idx), batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
+    
+    # 2. Initialize Model & Loss
+    if model_type == "cae":
+        model = CAE(latent_dim).to(device) # Instantiate Convolutional Autoencoder and move to GPU
+        loss_fn = cae_loss # Use L1 Reconstruction Loss
+    else: # VAE
+        model = VAE(latent_dim).to(device) # Instantiate Variational Autoencoder
+        # VAE loss returns a tuple (total, recon, kl). We only need the first element [0] for backprop.
+        loss_fn = lambda recon, x, mu, logvar: vae_loss(recon, x, mu, logvar)[0]
+    
+    # Initialize Adam Optimizer. It adapts learning rates per parameter, converging faster than standard SGD.
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr) 
+    
+    print(f"\n Starting PIXEL-BASED {model_type.upper()} training on '{category}'")
+    
+    # Track the best validation loss to save the optimal checkpoint
+    best_val_loss = float('inf')
+    
+    # 3. Training Loop
+    for epoch in range(num_epochs):
+        model.train() # Set model to Train mode (enables Dropout and BatchNorm updates)
+        train_loss = 0.0
+        
+        # Iterate through batches with a progress bar
+        for data, _ in tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Train]", leave=False):
+            data = data.to(device) # Move image batch to GPU
+            
+            # Reset gradients from previous step (accumulating gradients is a common bug)
+            optimizer.zero_grad()
+            
+            # Forward Pass
+            output = model(data)
+            
+            # Calculate Loss based on model type
+            if model_type == "cae":
+                loss = loss_fn(output, data) # Compare reconstruction vs original
+            else:
+                recon, mu, logvar = output # Unpack VAE outputs
+                loss = loss_fn(recon, data, mu, logvar) # Calculate ELBO loss
+
+            # Backward Pass (Backpropagation)
+            loss.backward() # Compute gradients
+            optimizer.step() # Update model weights
+            
+            train_loss += loss.item() # Accumulate batch loss
+        
+        # 4. Validation Loop
+        model.eval() # Set model to Evaluation mode (freezes BatchNorm, disables Dropout)
+        val_loss = 0.0
+        
+        # Disable gradient calculation context manager (saves massive amounts of VRAM)
+        with torch.no_grad():
+            for data, _ in val_loader:
+                data = data.to(device) # Move to GPU
+                output = model(data) # Forward pass
+                
+                # Calculate validation loss (same logic as training)
+                if model_type == "cae":
+                    loss = loss_fn(output, data)
+                else:
+                    recon, mu, logvar = output
+                    loss = loss_fn(recon, data, mu, logvar)
+                val_loss += loss.item()
+        
+        # Calculate average loss for the epoch
+        avg_train = train_loss / len(train_loader)
+        avg_val = val_loss / len(val_loader)
+        print(f"Epoch {epoch+1:2d}/{num_epochs} | Train: {avg_train:.6f} | Val: {avg_val:.6f}")
+        
+        # 5. Checkpointing
+        # Save model only if validation loss improves (prevents saving an overfitted model)
+        if avg_val < best_val_loss:
+            best_val_loss = avg_val
+            path = f"models/{model_type}_{category}_best.pth"
+            torch.save(model.state_dict(), path) # Serialize weights to disk
+            print(f"   Saved best weights: {path}")
+
+if __name__ == "__main__":
+    # Entry point: Train a CAE model on the 'bottle' category
+    # Change "cae" to "vae" to train the Variational Autoencoder
+    train_pixel_model("cae", "bottle")
+
+
+==============================================================================
+FILE 5: build_all_memory_banks.py
+DESCRIPTION: Phase 2 script to extract MobileNetV3 features and build FAISS index
+==============================================================================
+
+import os  # Standard library for filesystem operations (creating folders, checking paths)
+import torch  # PyTorch deep learning framework for tensor operations and GPU support
+import faiss  # Facebook AI Similarity Search: The core library for the nearest-neighbor 'memory bank'
+import numpy as np  # Library for handling large arrays of feature vectors
+from PIL import Image  # Library for loading images from disk
+from pathlib import Path  # Object-oriented path handling for cleaner file management
+from tqdm import tqdm  # Progress bar library to visualize training status
+import torchvision.transforms as T  # PyTorch tools for resizing and normalizing images
+from src.models import get_feature_extractor  # Imports your custom MobileNetV3 backbone wrapper
+
+# --- Configuration (Must match evaluation!) ---
+# Resolution 128x128 matches the evaluation and inference steps. 
+# Consistency is critical: features extracted at 256px will NOT match features at 128px.
+RESOLUTION = 128
+# Automatically detect GPU for acceleration. Feature extraction is much faster on CUDA.
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Standard ImageNet normalization. MobileNetV3 expects this specific distribution (mean/std).
+IMAGENET_NORM = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+
+# List of all 15 MVTec AD Categories to process
+MVTEC_CATEGORIES = [
+    'bottle', 'cable', 'capsule', 'carpet', 'grid', 'hazelnut', 
+    'leather', 'metal_nut', 'pill', 'screw', 'tile', 'toothbrush', 
+    'transistor', 'wood', 'zipper'
+]
+
+def build_memory_bank(category, model):
+    print(f"\nBuilding Memory Bank for '{category}'...")
+    
+    # Setup paths
+    # Defines the location of the 'good' training images for the current category
+    train_dir = Path("data/mvtec_ad") / category / "train" / "good"
+    # Defines where the resulting FAISS index file will be saved
+    save_path = f"models/{category}_patch_memory_bank.index"
+    
+    # Ensure directory exists
+    os.makedirs("models", exist_ok=True)  # Creates the 'models' folder if it's missing
+    
+    # Transform (Critical: Must be 128x128 like evaluation)
+    # Defines the preprocessing pipeline applied to every training image
+    transform = T.Compose([
+        T.Resize((RESOLUTION, RESOLUTION)),  # Resizes to 128x128
+        T.ToTensor(),  # Converts to PyTorch Tensor (0-1 float)
+        IMAGENET_NORM  # Applies ImageNet normalization stats
+    ])
+    
+    features_list = []  # Initialize an empty list to collect feature vectors
+    
+    # 1. Extract Features from Training Data
+    # Get a sorted list of all PNG images in the training folder
+    image_files = sorted(train_dir.glob("*.png"))
+    
+    # Error handling: If the folder is empty or path is wrong, skip this category
+    if not image_files:
+        print(f" Error: No training images found in {train_dir}")
+        return
+
+    # Loop through each training image with a progress bar
+    for img_path in tqdm(image_files, desc="Extracting features"):
+        image = Image.open(img_path).convert("RGB")  # Load image and ensure 3 channels (RGB)
+        x = transform(image).unsqueeze(0).to(DEVICE)  # Preprocess & add batch dimension [1, 3, 128, 128]
+        
+        with torch.no_grad():  # Disable gradient calculation (we are only extracting, not training)
+            patch_features = model(x) # Pass image through MobileNetV3 to get feature maps
+            
+            # Reshape: (B, C, H, W) -> (N_Patches, C)
+            # MobileNetV3 layer 1-3 concat dimension is 176
+            B, C, H, W = patch_features.shape
+            # Permute moves channels to the end, reshape flattens the spatial grid into a list of vectors
+            patch_vectors = patch_features.permute(0, 2, 3, 1).reshape(-1, C)
+            
+            # Move vectors to CPU and convert to NumPy for FAISS storage
+            features_list.append(patch_vectors.cpu().numpy())
+    
+    # 2. Stack and Index
+    # Safety check: If no features were extracted, exit
+    if not features_list:
+        return
+
+    # Combine the list of arrays into one massive NumPy array (Total_Patches x 176)
+    all_features = np.concatenate(features_list, axis=0)
+    
+    # Initialize FAISS Index (L2 Distance)
+    # 'IndexFlatL2' is a brute-force search index using Euclidean distance
+    d = all_features.shape[1] # Dimension (176)
+    index = faiss.IndexFlatL2(d)
+    
+    # Add features to index
+    # This stores the vectors in the FAISS structure, ready for searching
+    index.add(all_features)
+    
+    # 3. Save
+    # Write the built index to disk so we can load it later during inference
+    faiss.write_index(index, save_path)
+    print(f" Saved index to {save_path} ({index.ntotal} patches)")
+
+if __name__ == "__main__":
+    # Load model once
+    # We load the MobileNetV3 backbone only once and reuse it for all categories to save time
+    print("Loading MobileNetV3 backbone...")
+    model = get_feature_extractor().to(DEVICE)
+    model.eval() # Set to evaluation mode
+    
+    # Loop through all categories
+    # Automates the process for the entire dataset
+    for cat in MVTEC_CATEGORIES:
+        build_memory_bank(cat, model)
+        
+    print("\n DONE. All memory banks built!")
+
+
+==============================================================================
+FILE 6: optimize_threshold.py
+DESCRIPTION: Script to calculate the optimal F1-Score threshold (tau)
+==============================================================================
+
+import torch  # Core Deep Learning library
+import numpy as np  # For numerical operations on scores and arrays
+import faiss  # Facebook AI Similarity Search (The Memory Bank)
+from pathlib import Path  # Object-oriented filesystem path handling
+from tqdm import tqdm  # Progress bar for tracking the loop status
+from PIL import Image  # Library for loading images from disk
+import torchvision.transforms as T  # PyTorch image preprocessing tools
+from sklearn.metrics import precision_recall_curve  # Metric tool to calculate P-R curve points
+from src.models import get_feature_extractor  # Imports your custom MobileNetV3 wrapper
+
+# --- Configuration ---
+# Resolution 128x128 matches the training setup. Consistency is key for valid inference.
+RESOLUTION = 128
+# Automatically detect GPU availability to ensure fast processing
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Define standard ImageNet normalization. MobileNetV3 expects this distribution of pixel values.
+IMAGENET_NORM = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+
+def load_components(category):
+    """
+    Helper function to load the Model and the Memory Bank into RAM/VRAM.
+    """
+    # Initialize the MobileNetV3 feature extractor and move it to the GPU
+    model = get_feature_extractor().to(DEVICE)
+    
+    # Construct the path to the trained FAISS index for this category
+    bank_path = f"models/{category}_patch_memory_bank.index"
+    
+    # Load the FAISS index from disk. This contains the 'normal' patch embeddings.
+    index = faiss.read_index(bank_path)
+    return model, index
+
+def find_optimal_threshold(category="bottle"):
+    print(f"\n Optimizing Threshold for '{category}' (128x128)...")
+    
+    # 1. Load the AI Engine (Model + Memory Bank)
+    model, index = load_components(category)
+    
+    # Define paths to test data (contains both 'good' and 'defect' images)
+    test_dir = Path("data/mvtec_ad") / category / "test"
+    
+    # The output dimension of MobileNetV3 (Layers 1+2+3 concatenated)
+    raw_feature_dim = 176
+    
+    # 2. Define Preprocessing Pipeline
+    # Must be identical to the training pipeline to ensure features match the memory bank
+    test_transform = T.Compose([
+        T.Resize((RESOLUTION, RESOLUTION)),
+        T.ToTensor(),
+        IMAGENET_NORM
+    ])
+    
+    # Lists to store the ground truth (0/1) and the predicted anomaly scores
+    y_true, y_scores = [], []
+    
+    print("Collecting anomaly scores...")
+    
+    # Iterate through all subfolders (e.g., 'good', 'broken_large', 'contamination')
+    for defect_type in sorted(test_dir.iterdir()):
+        if not defect_type.is_dir(): continue # Skip files, only process folders
+        
+        # Ground Truth Logic: 'good' folder = 0 (Normal), anything else = 1 (Anomaly)
+        is_anomaly = defect_type.name != "good"
+        
+        # Loop through every image in the current folder
+        for img_path in tqdm(sorted(defect_type.glob("*.png")), desc=defect_type.name):
+            
+            # --- Inference Pipeline (Identical to Deployment) ---
+            image = Image.open(img_path).convert("RGB") # Load image
+            x = test_transform(image).unsqueeze(0).to(DEVICE) # Preprocess & add batch dim
+            
+            with torch.no_grad(): # Disable gradients for speed
+                # Extract features using MobileNetV3
+                patch_features = model(x)
+                
+                # Reshape features: [1, C, H, W] -> [N_Patches, C] for FAISS search
+                H, W = patch_features.shape[2:]
+                patch_vectors = patch_features.permute(0, 2, 3, 1).reshape(-1, raw_feature_dim).cpu().numpy()
+                
+                # Nearest Neighbor Search: Find distance to closest 'normal' patch
+                D, _ = index.search(patch_vectors, 1)
+                
+                # Image Score = The maximum patch distance found in the image
+                # (i.e., the "most anomalous" part of the image determines the score)
+                image_score = np.max(D)
+                
+            # Append results to lists for batch calculation later
+            y_true.append(1 if is_anomaly else 0)
+            y_scores.append(image_score)
+
+    # Convert lists to NumPy arrays for efficient vector math
+    y_true = np.array(y_true)
+    y_scores = np.array(y_scores)
+    
+    # 3. Calculate Precision-Recall Curve
+    # This function calculates precision/recall at *every possible threshold* in the dataset
+    precision, recall, thresholds = precision_recall_curve(y_true, y_scores)
+    
+    # 4. Calculate F1-Score for every threshold
+    # F1 = 2 * (Precision * Recall) / (Precision + Recall)
+    numerator = 2 * precision * recall
+    denominator = precision + recall
+    
+    # Safe division: handles cases where denominator is 0 (to avoid NaNs)
+    f1_scores = np.divide(numerator, denominator, out=np.zeros_like(numerator), where=denominator!=0)
+    
+    # 5. Find the Maximum F1 Score
+    # The index of the highest F1 score corresponds to the "Optimal Threshold"
+    best_idx = np.argmax(f1_scores)
+    best_threshold = thresholds[best_idx]
+    best_f1 = f1_scores[best_idx]
+    
+    # Output Results
+    print(f"\n Optimization Complete for '{category}'")
+    print(f"   Optimal Threshold (tau): {best_threshold:.6f}")
+    print(f"   Max F1-Score:            {best_f1:.4f}")
+    
+    # 6. Save the Threshold to Disk
+    # This allows the 'real-time demo' script to load this exact value later
+    with open(f"models/{category}_threshold.txt", "w") as f:
+        f.write(str(best_threshold))
+        
+    return best_threshold
+
+if __name__ == "__main__":
+    # Entry point: Optimize threshold for the 'bottle' category
+    find_optimal_threshold("bottle")
+
+
+==============================================================================
+FILE 7: profile_latency.py
+DESCRIPTION: Latency benchmarking script to verify <100ms requirement
+==============================================================================
+
+import time  # For measuring high-precision execution time
+import torch  # The core deep learning library
+import numpy as np  # For statistical calculations (mean latency)
+import faiss  # The high-speed search library for the memory bank
+from src.models import get_feature_extractor  # Imports your custom MobileNetV3 wrapper
+
+# --- Configuration ---
+# 128x128 resolution is chosen to minimize computational load (FLOPs)
+RESOLUTION = 128
+# Automatically detect GPU (CUDA) for acceleration; fallback to CPU if needed
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+CATEGORY = "bottle"  # Product category to profile
+MODEL_NAME = "tf_mobilenetv3_large_100"  # Specific lightweight model architecture
+RAW_FEATURE_DIM = 176  # The fixed size of the feature vector (Layers 1+2+3)
+
+def load_components():
+    """
+    Loads the Model and Memory Bank into RAM/VRAM.
+    This happens once at startup to avoid re-loading overhead during profiling.
+    """
+    print(f"Loading {MODEL_NAME} and raw memory bank...")
+    # Initialize model and move to GPU
+    model = get_feature_extractor().to(DEVICE)
+    model.eval() # Set to evaluation mode (optimization)
+    
+    # Load the pre-built FAISS index from disk
+    bank_path = f"models/{CATEGORY}_patch_memory_bank.index"
+    index = faiss.read_index(bank_path)
+    
+    return model, index
+
+def profile_inference():
+    # 1. Setup
+    model, index = load_components()
+    
+    # Create a 'Dummy Input' (Random Noise) of the correct shape [1, 3, 128, 128]
+    # This simulates a camera image without the I/O overhead of loading a file from disk
+    dummy_input = torch.randn(1, 3, RESOLUTION, RESOLUTION).to(DEVICE)
+    
+    print(f"\n Profiling Latency for MobileNetV3 (128x128) (Target: < 100ms)...")
+    
+    # 2. Warmup Phase (CRITICAL)
+    # The first few passes on a GPU are always slow due to kernel initialization and memory allocation.
+    # We run 10 dummy passes to "warm up" the GPU so our measurements reflect stable performance.
+    print("Warming up GPU...")
+    for _ in range(10):
+        with torch.no_grad(): _ = model(dummy_input)
+            
+    latencies = []
+    iterations = 100 # Run 100 times to get a statistically significant average
+    
+    print(f"Running {iterations} cycles...")
+    for _ in range(iterations):
+        # 3. Start Timer
+        # torch.cuda.synchronize() ensures all previous GPU tasks are done before we start the clock.
+        # This prevents measuring background noise.
+        torch.cuda.synchronize() 
+        start_time = time.perf_counter() # Use perf_counter for microsecond precision
+        
+        with torch.no_grad(): # Disable gradient calculation to simulate real inference
+            # A. Model Inference: Forward pass through MobileNetV3
+            patch_features = model(dummy_input)
+            
+            # B. Reshape: Flatten the spatial feature maps into vectors for FAISS
+            # [1, 176, 8, 8] -> [64, 176]
+            H, W = patch_features.shape[2:]
+            patch_vectors = patch_features.permute(0, 2, 3, 1).reshape(-1, RAW_FEATURE_DIM).cpu().numpy()
+            
+            # C. Search: Nearest Neighbor search in the Memory Bank
+            D, _ = index.search(patch_vectors, 1)
+            score = np.max(D) # The max distance is the anomaly score
+            
+        # 4. Stop Timer
+        # Synchronize again to make sure the GPU actually finished the work before stopping the clock.
+        torch.cuda.synchronize() 
+        end_time = time.perf_counter()
+        latencies.append((end_time - start_time) * 1000) # Convert to milliseconds
+
+    # 5. Report Statistics
+    avg_latency = np.mean(latencies)
+    print(f"\nResults (MobileNetV3 128x128):")
+    print(f"   Average Latency: {avg_latency:.2f} ms")
+    print(f"   Throughput:      {1000/avg_latency:.2f} FPS")
+    
+    # 6. Pass/Fail Check
+    if avg_latency < 100:
+        print("\nSUCCESS: Real-time requirement met (< 100ms)!")
+    else:
+        print("\n WARNING: Still too slow.")
+
+if __name__ == "__main__":
+    profile_inference()
+
+
+==============================================================================
+FILE 8: evaluate.py
+DESCRIPTION: Main evaluation script for generating metrics and heatmaps
+==============================================================================
+
+import os  # Standard library for interacting with the operating system (e.g., checking file existence)
+import torch  # PyTorch deep learning framework for tensor operations and model execution
+import numpy as np  # Library for numerical operations and array manipulation
+import faiss  # Facebook AI Similarity Search library for efficient nearest-neighbor search
+from PIL import Image  # Library for loading and manipulating images
+from pathlib import Path  # Object-oriented filesystem paths for easier path handling
+from tqdm import tqdm  # Library to display progress bars during long loops
+import torchvision.transforms as T  # PyTorch transforms for image preprocessing (resize, normalize)
+from torchvision.utils import save_image  # Utility to save PyTorch tensors directly as image files
+from scipy.ndimage import gaussian_filter  # Function to apply Gaussian smoothing to the anomaly maps
+from src.models import get_feature_extractor  # Imports your custom MobileNetV3 model wrapper
+from src.utils import compute_aupro, compute_image_auroc  # Imports your custom metric calculation functions
+
+# Configuration 
+# Sets input resolution to 128x128. Matches training configuration to ensure feature consistency.
+RESOLUTION = 128
+# Automatically selects GPU for fast inference if available, otherwise falls back to CPU.
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Sigma=4.0 for Gaussian blur. Balances smoothing noise while preserving defect shapes.
+GAUSSIAN_SIGMA = 4.0
+# Standard ImageNet normalization stats. Critical for pre-trained MobileNetV3 models to work correctly.
+IMAGENET_NORM = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+
+def load_memory_bank(category="bottle"):
+    """Loads the pre-computed FAISS index from disk."""
+    # Constructs the path to the FAISS index file for the specific category
+    bank_path = f"models/{category}_patch_memory_bank.index"
+    
+    # Fail-fast check: ensures the memory bank file exists before proceeding
+    if not os.path.exists(bank_path):
+        raise FileNotFoundError(f"Memory bank not found: {bank_path}. Run build_memory_bank.py first.")
+        
+    print(f"Loading patch memory bank from {bank_path}")
+    return faiss.read_index(bank_path)  # Loads the index from disk into RAM for searching
+
+def evaluate_category_features(category="bottle"):
+    print(f"\n Starting PATCH-LEVEL evaluation for '{category}' (128x128)...")
+    
+    # 1. Initialize Model & Index
+    # Loads the feature extractor (MobileNetV3) and moves it to the active device (GPU)
+    model = get_feature_extractor().to(DEVICE)
+    # Loads the specific memory bank for the category being evaluated
+    index = load_memory_bank(category)
+    # Defines the dimension of the feature vector (MobileNetV3 Layers 1+2+3 concatenated = 176)
+    raw_feature_dim = 176 
+
+    # 2. Setup Data Paths
+    # Path to the test images for this category
+    test_dir = Path("data/mvtec_ad") / category / "test"
+    # Path to the ground truth masks (pixel-level labels)
+    gt_dir = Path("data/mvtec_ad") / category / "ground_truth"
+    # Creates the results directory if it doesn't exist
+    os.makedirs("results", exist_ok=True)
+    
+    # 3. Define Preprocessing Pipeline (Must match training!)
+    test_transform = T.Compose([
+        T.Resize((RESOLUTION, RESOLUTION)),  # Resizes image to 128x128
+        T.ToTensor(),  # Converts image to Tensor (0-1 float)
+        IMAGENET_NORM  # Normalizes using ImageNet mean/std
+    ])
+    
+    # Initialize lists to store results for final metric calculation
+    anomaly_maps, gt_masks, image_scores, image_labels = [], [], [], []
+
+    # Iterate through each defect type folder (e.g., 'broken_large', 'contamination', 'good')
+    for defect_type in sorted(test_dir.iterdir()):
+        if not defect_type.is_dir(): continue  # Skip files, only process directories
+        
+        # Determine if the current folder contains anomalies (anything not named "good")
+        is_anomaly = defect_type.name != "good"
+        
+        # Process every image in the folder with a progress bar
+        for i, img_path in enumerate(tqdm(sorted(defect_type.glob("*.png")), desc=f"Evaluating {defect_type.name}")):
+            
+            # --- Inference Step ---
+            image = Image.open(img_path).convert("RGB")  # Load image and ensure 3 channels (RGB)
+            x = test_transform(image).unsqueeze(0).to(DEVICE)  # Preprocess & add batch dimension [1, 3, 128, 128]
+            
+            with torch.no_grad():  # Disable gradient calculation to save memory and speed up inference
+                patch_features = model(x)  # Pass image through MobileNetV3 to get feature maps
+                
+                # Reshape features: [1, C, H, W] -> [H*W, C] (Flatten spatial dimensions)
+                H, W = patch_features.shape[2:]
+                # Permute ensures channels are last, reshape flattens height/width
+                patch_vectors = patch_features.permute(0, 2, 3, 1).reshape(H * W, raw_feature_dim)
+                patch_vectors_np = patch_vectors.cpu().numpy() # Convert to Numpy array for FAISS
+
+            # --- Feature Matching Step ---
+            # Search for the nearest neighbor in the memory bank for every patch
+            # D = Distances (Anomaly Scores), I = Indices (Ignored)
+            D, I = index.search(patch_vectors_np, 1) 
+            
+            # --- Anomaly Map Generation ---
+            anomaly_map_hw = D.reshape(H, W)  # Reshape flat distance scores back to 2D grid
+            
+            # Upsample the low-res feature map back to input resolution (128x128)
+            # Bilinear interpolation creates a smooth transition between patch scores
+            anomaly_map_full = T.Resize(
+                (RESOLUTION, RESOLUTION), 
+                interpolation=T.InterpolationMode.BILINEAR,
+                antialias=True
+            )(torch.tensor(anomaly_map_hw).unsqueeze(0).unsqueeze(0)).squeeze().numpy()
+            
+            # Apply Gaussian Blur to smooth blocky artifacts and create a natural-looking heatmap
+            error_map = gaussian_filter(anomaly_map_full, sigma=GAUSSIAN_SIGMA)
+            
+            # --- Visualization (Debug Output) ---
+            # Saves visualization only for the first image of 'good' and 'broken_large' classes for inspection
+            if (defect_type.name == "good" and i == 0) or (defect_type.name == "broken_large" and i == 0):
+                orig_img = Image.open(img_path).resize((RESOLUTION, RESOLUTION)) # Load original for reference
+                orig_img.save(f"results/patch_input_{defect_type.name}.png") # Save input
+                
+                # Normalize error map to 0-1 range for visualization
+                norm_error = (error_map - error_map.min()) / (error_map.max() - error_map.min() + 1e-8)
+                error_vis = torch.from_numpy(norm_error).unsqueeze(0).repeat(3,1,1) # Make 3-channel for saving
+                save_image(error_vis, f"results/patch_error_{defect_type.name}.png") # Save heatmap
+
+            # --- Ground Truth Handling ---
+            if is_anomaly:
+                # Load ground truth mask corresponding to the defect image
+                mask_path = gt_dir / defect_type.name / (img_path.stem + "_mask.png")
+                mask = Image.open(mask_path).convert("L") # Load as grayscale
+                mask = mask.resize((RESOLUTION, RESOLUTION), Image.NEAREST) # Resize using Nearest Neighbor (preserves binary values)
+                mask = np.array(mask) / 255.0 # Normalize to 0-1
+            else:
+                # Create a blank (all zero) mask for good images
+                mask = np.zeros((RESOLUTION, RESOLUTION))
+            
+            # Store results for metrics calculation
+            anomaly_maps.append(error_map) # Store predicted heatmap
+            gt_masks.append((mask > 0.5).astype(np.uint8)) # Store binary ground truth mask
+            image_scores.append(error_map.max()) # Image-level score is the maximum pixel score
+            image_labels.append(1 if is_anomaly else 0) # Store classification label (1=Defect, 0=Good)
+    
+    # --- Metric Calculation ---
+    # Compute AUPRO (Localization metric) and AUROC (Detection metric)
+    pixel_aupro = compute_aupro(anomaly_maps, gt_masks)
+    image_auroc = compute_image_auroc(image_scores, image_labels)
+    
+    # Print final results
+    print(f"\n {category.upper()} (Patch-Level 128x128)")
+    print(f"   Pixel AUPRO: {pixel_aupro:.4f}")
+    print(f"   Image AUROC: {image_auroc:.4f}")
+    return pixel_aupro, image_auroc
+
+if __name__ == "__main__":
+    # Entry point: runs the evaluation for the 'bottle' category
+    evaluate_category_features(category="bottle")
+
+
+==============================================================================
+FILE 9: real_time_demo.py
+DESCRIPTION: Simulation of the final production line decision logic
+==============================================================================
+
+import os  # Used to check if model files exist on the disk
+import time  # Used for measuring the inference latency (speed) of the system
+import torch  # The core Deep Learning framework
+import numpy as np  # Used for numerical operations on the score arrays
+import faiss  # The library used for the high-speed Nearest Neighbor search (Memory Bank)
+from PIL import Image  # Used to load images from disk
+import torchvision.transforms as T  # Used to preprocess images (resize/normalize) before the model
+from src.models import get_feature_extractor  # Imports your custom MobileNetV3 wrapper
+
+# --- System Configuration ---
+RESOLUTION = 128  # Fixed resolution (128x128) to ensure <40ms speed
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # Auto-selects GPU if available
+RAW_FEATURE_DIM = 176  # The size of the feature vector output by MobileNetV3 (Layers 1-3)
+CATEGORY = "bottle"  # The specific product line currently being inspected
+
+class AnomalyDetector:
+    def __init__(self):
+        print(" System Initializing...")  # User feedback log
+        
+        # 1. Load Model
+        # Initializes the lightweight feature extractor and moves it to GPU for speed
+        self.model = get_feature_extractor().to(DEVICE)
+        self.model.eval()  # Sets model to evaluation mode (freezes BatchNorm/Dropout layers)
+        
+        # 2. Load Memory Bank (FAISS Index)
+        bank_path = f"models/{CATEGORY}_patch_memory_bank.index"  # Path to the trained memory bank
+        
+        # Safety check: ensures the memory bank exists before trying to load it
+        if not os.path.exists(bank_path):
+             raise FileNotFoundError(f"Memory bank missing: {bank_path}")
+             
+        print(f"   Loading Memory Bank: {bank_path}")
+        self.index = faiss.read_index(bank_path)  # Loads the FAISS index from disk into RAM
+        
+        # 3. Load Optimized Threshold (tau)
+        thresh_path = f"models/{CATEGORY}_threshold.txt"  # Path to the threshold calculated during training
+        with open(thresh_path, "r") as f:
+            self.threshold = float(f.read().strip())  # Reads the threshold value
+        print(f"   Loaded Threshold (tau): {self.threshold:.4f}")
+        
+        # 4. Setup Transform
+        # Defines the exact preprocessing pipeline used during training to ensure consistency
+        self.transform = T.Compose([
+            T.Resize((RESOLUTION, RESOLUTION)),  # Resizes to 128x128
+            T.ToTensor(),  # Converts image to PyTorch Tensor (0-1 float)
+            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])  # Normalizes using ImageNet stats
+        ])
+        
+        # 5. Warmup GPU (Critical for accurate first-inference timing)
+        # Creates a fake image to run through the model once.
+        # This forces CUDA to initialize its kernels so the first real prediction isn't slow.
+        dummy = torch.randn(1, 3, RESOLUTION, RESOLUTION).to(DEVICE)
+        with torch.no_grad(): self.model(dummy)
+        print(" System Ready.")  # Confirms the system is fully loaded and ready
+
+    def predict(self, image_path):
+        """
+        End-to-End Inference for Industrial Control.
+        Returns: (is_anomaly: bool, score: float, latency: float)
+        """
+        # Load Image from disk and convert to RGB to handle grayscale/alpha inputs correctly
+        image = Image.open(image_path).convert("RGB")
+        # Transform image and add a batch dimension [1, 3, 128, 128] for the model
+        x = self.transform(image).unsqueeze(0).to(DEVICE)
+        
+        # Start Timer
+        torch.cuda.synchronize()  # Waits for all previous GPU tasks to finish for accurate timing
+        t0 = time.perf_counter()  # Records the start time with high precision
+        
+        with torch.no_grad():  # Disables gradient calculation to save memory and speed up inference
+            # Extract Features: Passes image through MobileNetV3
+            patch_features = self.model(x)
+            
+            # Reshape [B, C, H, W] -> [N_Patches, C]
+            # Flattens the spatial map so each patch becomes a separate 176-d vector
+            B, C, H, W = patch_features.shape
+            patch_vectors = patch_features.permute(0, 2, 3, 1).reshape(-1, RAW_FEATURE_DIM).cpu().numpy()
+            
+            # Search Memory Bank: Finds the nearest neighbor for every patch
+            D, _ = self.index.search(patch_vectors, 1)
+            
+            # Score = Max distance of any patch
+            # If even one patch is far from the memory bank (high distance), the whole image is anomalous
+            score = np.max(D)
+        
+        # Stop Timer
+        torch.cuda.synchronize()  # Waits for the GPU to finish the search
+        latency = (time.perf_counter() - t0) * 1000  # Calculates elapsed time in milliseconds
+        
+        # Decision Logic (The "Bridge" to PLC)
+        # Compares the score against the pre-calculated threshold (tau)
+        is_anomaly = score > self.threshold
+        
+        return is_anomaly, score, latency
+
+    def send_signal_to_plc(self, signal_type):
+        """
+        Mock hardware interface.
+        In a real deployment, this would use a library like 'pymodbus' or 'RPi.GPIO'.
+        """
+        if signal_type == "REJECT":
+            # Simulator for sending a 24V signal to a pneumatic air-jet to reject the bottle
+            print("    [HARDWARE] GPIO_18 HIGH -> Triggering Reject Mechanism (Air Jet)")
+        else:
+            # Simulator for keeping the line running
+            print("    [HARDWARE] GPIO_18 LOW  -> Conveyor Continue")
+
+def simulate_production_line():
+    """
+    Simulates a conveyor belt passing images to the system.
+    """
+    detector = AnomalyDetector()  # Instantiate the detector (loads model/index once)
+    
+    # List of images representing items coming down the conveyor belt
+    test_images = [
+        "data/mvtec_ad/bottle/test/good/000.png",
+        "data/mvtec_ad/bottle/test/broken_large/000.png",
+        "data/mvtec_ad/bottle/test/good/001.png",
+        "data/mvtec_ad/bottle/test/broken_large/019.png"
+    ]
+    
+    print("\n STARTING PRODUCTION LINE SIMULATION\n")
+    
+    # Loop through each image, simulating the camera trigger
+    for img_path in test_images:
+        print(f" Camera Input: {img_path}")
+        
+        # 1. Run Inference
+        # Gets the decision, score, and speed from the AI
+        is_defective, score, latency = detector.predict(img_path)
+        
+        # 2. Determine Signal for the Operator
+        status = " FAIL (Defect)" if is_defective else " PASS (Good)"
+        signal = "REJECT" if is_defective else "ACCEPT"
+        
+        # 3. Log Results to Console
+        print(f"    Inference Time: {latency:.2f} ms")
+        print(f"   Anomaly Score:  {score:.4f} (Threshold: {detector.threshold:.4f})")
+        print(f"   Decision:        {status}")
+        
+        # 4. Trigger Hardware
+        # Sends the physical signal to the machine
+        detector.send_signal_to_plc(signal)
+        print("-" * 50)  # Separator for readability
+        
+        time.sleep(1) # Simulates the time gap between bottles on the belt
+
+if __name__ == "__main__":
+    simulate_production_line()  # Runs the simulation when script is executed
